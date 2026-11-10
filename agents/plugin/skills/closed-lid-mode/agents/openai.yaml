@@ -1,0 +1,5 @@
+interface:
+  display_name: "Closed-lid mode"
+  short_description: "Continue Mac tasks with the lid closed and from your phone"
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,33 @@
+# macOS and editor state
+.DS_Store
+.AppleDouble
+*.xcuserstate
+xcuserdata/
+.idea/
+.vscode/
+
+# Generated builds and Python caches
+/build/
+.build/
+DerivedData/
+__pycache__/
+*.py[cod]
+
+# Local verification, archived integrations, and backups
+/evidence/
+/skill-integration/
+/backup-*/
+*.log
+
+# Machine-specific signing material and credentials
+/capture-signing-identity.txt
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+
+# Local agent configuration
+.claude/settings.local.json

@@ -1,0 +1,12 @@
+{
+  "name": "lidrunner-local",
+  "description": "Local marketplace for the LidRunner closed-lid plugin.",
+  "owner": { "name": "Anmol Bhatia" },
+  "plugins": [
+    {
+      "name": "lidrunner",
+      "source": "./plugin",
+      "description": "Closed-lid and phone-remote awareness for LidRunner: live status, screenshot recovery guidance, lifecycle notices."
+    }
+  ]
+}

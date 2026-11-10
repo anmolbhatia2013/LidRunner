@@ -1,0 +1,14 @@
+{
+  "description": "LidRunner closed-lid notices. Read-only; never approves, denies or rewrites tool calls.",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}/skills/closed-lid-mode/scripts/hook.py\" --host claude", "timeout": 3 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}/skills/closed-lid-mode/scripts/hook.py\" --host claude", "timeout": 3 } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "/usr/bin/python3 \"${CLAUDE_PLUGIN_ROOT}/skills/closed-lid-mode/scripts/hook.py\" --host claude", "timeout": 3 } ] }
+    ]
+  }
+}

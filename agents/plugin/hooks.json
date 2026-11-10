@@ -1,0 +1,11 @@
+{
+  "lidrunner-closed-lid": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "/usr/bin/python3 ./skills/closed-lid-mode/scripts/hook.py --host antigravity --event PreInvocation",
+        "timeout": 3
+      }
+    ]
+  }
+}
