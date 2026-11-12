@@ -4,6 +4,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 
 import os
@@ -128,6 +129,44 @@ class SimulationTests(unittest.TestCase):
    st=status.simulated('closed',100.0)
    r=hook.run({'hook_event_name':'SessionStart','session_id':'s'},st,pathlib.Path(d),host='claude')
    self.assertTrue(r['hookSpecificOutput']['additionalContext'].startswith('[SIMULATED TEST STATE'))
+
+class PruneTests(unittest.TestCase):
+ def setUp(self):
+  self.temp=tempfile.TemporaryDirectory(); self.cache=pathlib.Path(self.temp.name); self.now=1_000_000_000.0
+ def tearDown(self): self.temp.cleanup()
+ def make(self,stem,age_days,lock=True):
+  for suffix in (['.json','.lock'] if lock else ['.json']):
+   f=self.cache/(stem+suffix); f.write_text('{}'); t=self.now-age_days*86400; os.utime(f,(t,t))
+ def test_old_sessions_removed_recent_kept(self):
+  old,new='a'*64,'b'*64
+  self.make(old,2); self.make(new,0.1)
+  self.assertEqual(hook.prune(self.cache,self.now),2)
+  names={p.name for p in self.cache.iterdir()}
+  self.assertEqual(names,{new+'.json',new+'.lock','.pruned'})
+ def test_old_lock_kept_while_session_is_fresh(self):
+  stem='c'*64; self.make(stem,0.1)
+  t=self.now-30*86400; os.utime(self.cache/(stem+'.lock'),(t,t)) # lock mtime never updates
+  hook.prune(self.cache,self.now)
+  self.assertTrue((self.cache/(stem+'.lock')).exists())
+ def test_orphan_lock_removed(self):
+  stem='d'*64; (self.cache/(stem+'.lock')).write_text(''); t=self.now-9*86400; os.utime(self.cache/(stem+'.lock'),(t,t))
+  self.assertEqual(hook.prune(self.cache,self.now),1)
+ def test_throttled_by_marker(self):
+  self.make('e'*64,2)
+  (self.cache/'.pruned').write_text(''); os.utime(self.cache/'.pruned',(self.now-60,self.now-60))
+  self.assertEqual(hook.prune(self.cache,self.now),0)
+  self.assertEqual(hook.prune(self.cache,self.now+7*3600),2)
+ def test_foreign_files_untouched(self):
+  for name in ('notes.txt','f'*64+'.txt','short.json','G'*64+'.json'):
+   f=self.cache/name; f.write_text('x'); t=self.now-90*86400; os.utime(f,(t,t))
+  sub=self.cache/('1'*64+'.json'); sub.mkdir()
+  self.assertEqual(hook.prune(self.cache,self.now),0)
+  self.assertEqual(len(list(self.cache.iterdir())),6) # five untouched entries plus the marker
+ def test_run_prunes_and_still_answers(self):
+  self.make('a'*64,30)
+  st=status.simulated('closed',time.time())
+  r=hook.run({'hook_event_name':'SessionStart','session_id':'s'},st,self.cache,host='claude')
+  self.assertIsNotNone(r); self.assertFalse((self.cache/('a'*64+'.json')).exists())
 
 class ClaudeHookTests(HookTests):
  HOST='claude'

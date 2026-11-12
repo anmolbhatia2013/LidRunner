@@ -60,6 +60,8 @@ final class CaptureGuard: NSObject, NSApplicationDelegate {
     private var previousActive = false
     private var repairs = 0
     private var lastRepair: [String: Any]?
+    private var lastWrittenState = Data() // worker queue only
+    private var lastWrite: Double = 0
     private let statusURL = userDir.appendingPathComponent("capture-guard.json")
     private var enabled: Bool { !UserDefaults.standard.bool(forKey: "paused") }
 
@@ -77,7 +79,9 @@ final class CaptureGuard: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit Capture Guard", action: #selector(quit), keyEquivalent: "q")
         for entry in menu.items { entry.target = self }; item.menu = menu
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        // Common modes: keep scanning (and keep the status file fresh) while this menu is open.
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer, forMode: .common); self.timer = timer
         tick()
         if !AXIsProcessTrusted() { showSetup() }
     }
@@ -129,14 +133,21 @@ final class CaptureGuard: NSObject, NSApplicationDelegate {
         queue.async { [self] in
             let report = scan(active: active, trusted: trusted, now: now, screens: screens, signature: signature, apps: apps)
             var state = report
-            state["time"] = Date().timeIntervalSince1970
             state["lidClosed"] = closed
             state["accessibilityTrusted"] = trusted
             state["sessionEligible"] = active
+            state["enabled"] = enabled
             state["repairs"] = repairs
             if let lastRepair { state["lastRepair"] = lastRepair }
-            if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
-                try? data.write(to: statusURL, options: .atomic)
+            // Readers treat the file as fresh for 8-10 seconds: write on change, else every 3 s.
+            let stamp = Date().timeIntervalSince1970
+            let unstamped = (try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])) ?? Data()
+            if unstamped != lastWrittenState || stamp - lastWrite >= 3 || stamp < lastWrite {
+                state["time"] = stamp
+                if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
+                    try? data.write(to: statusURL, options: .atomic)
+                    lastWrittenState = unstamped; lastWrite = stamp
+                }
             }
             let label = state["status"] as? String ?? "Unknown"
             DispatchQueue.main.async { [self] in statusItem.title = label; scanning = false }

@@ -109,3 +109,79 @@ func shouldReopenAgentApp(active: Bool, enabled: Bool, running: Bool, launching:
           let missingSince, now - missingSince >= 15 else { return false }
     return lastAttempt == nil || now - lastAttempt! >= 60
 }
+
+// MARK: - 1.4 policy helpers (pure, covered by Tests/PolicyTests.swift)
+
+let sessionLengths = [1, 2, 4, 8]
+/// The remembered session length, clamped to a supported value (default 8 hours).
+func sessionSeconds(storedHours: Int) -> Int {
+    (sessionLengths.contains(storedHours) ? storedHours : 8) * 3600
+}
+
+/// The sampling history is evidence for sessions, not an idle activity log: record every
+/// sample while a session is active, otherwise only state changes plus a slow keep-alive.
+func shouldAppendSample(now: Double, lastAppend: Double?, sessionActive: Bool, changed: Bool) -> Bool {
+    if sessionActive || changed { return true }
+    guard let lastAppend else { return true }
+    return now - lastAppend >= 60 || now < lastAppend
+}
+
+/// A session that was running and ended without the user stopping it deserves an
+/// explanation the next time they look at the Mac. Returns the reason to show, or nil.
+func sessionEndNotice(wasActive: Bool, phase: String, reason: String, userStopping: Bool) -> String? {
+    guard wasActive, !userStopping, phase == "stopped" || phase == "failed" else { return nil }
+    let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty || trimmed == "Stopped by user" { return nil }
+    return trimmed
+}
+
+/// A stale start error should not label the window forever.
+func errorStillRelevant(now: Double, shownAt: Double?) -> Bool {
+    guard let shownAt else { return false }
+    return now - shownAt < 120 && now >= shownAt - 5
+}
+
+/// What the main window says about the optional Capture Guard companion.
+enum GuardState: Equatable {
+    case notInstalled, notRunning, needsPermission, paused
+    case ready(String)
+}
+func captureGuardState(installed: Bool, report: [String: Any]?, now: Double) -> GuardState {
+    guard installed else { return .notInstalled }
+    guard let report, let time = report["time"] as? Double, now - time < 10, now - time > -5 else { return .notRunning }
+    if report["accessibilityTrusted"] as? Bool != true { return .needsPermission }
+    if report["enabled"] as? Bool == false { return .paused }
+    let repairs = report["repairs"] as? Int ?? 0
+    let shared = report["sharedWindows"] as? Int ?? 0
+    if shared > 0 { return .ready("Watching \(shared) shared window\(shared == 1 ? "" : "s")") }
+    if report["sessionEligible"] as? Bool == true {
+        return .ready(repairs > 0 ? "Active · \(repairs) window\(repairs == 1 ? "" : "s") re-centred" : "Active · no shared windows yet")
+    }
+    return .ready("Ready · works when the lid is closed in a session")
+}
+
+/// The heartbeat is written off the main thread so an open menu or a briefly busy UI cannot
+/// end a session (1.3 lost a session this way). It still stops if the UI stays unresponsive
+/// for ten minutes, so a truly hung app cannot hold the Mac awake until the deadline.
+let mainThreadStallLimit = 600.0
+func heartbeatShouldContinue(now: Double, lastMainTick: Double) -> Bool {
+    now - lastMainTick < mainThreadStallLimit && now >= lastMainTick - 5
+}
+
+/// Plain-language account of why the previous session ended.
+func lastSessionSentence(_ reason: String) -> String {
+    switch reason.trimmingCharacters(in: .whitespacesAndNewlines) {
+    case "Stopped by user": return "Last session: you stopped it."
+    case "Session timer finished": return "Last session ran its full time."
+    case "Battery reached 15%": return "Last session stopped at 15% battery."
+    case "Battery reading unavailable": return "Last session stopped because the battery level couldn't be read."
+    case "Mac is under high thermal pressure": return "Last session stopped because the Mac got too hot."
+    case "LidRunner closed": return "Last session stopped when LidRunner quit."
+    case "LidRunner heartbeat lost": return "Last session stopped because LidRunner stopped responding."
+    case "Power setting changed outside LidRunner": return "Last session stopped because something else changed the sleep setting."
+    case "Recovered interrupted session": return "Last session was interrupted by a restart or crash; normal sleep was restored."
+    case let other:
+        let text = other.hasSuffix(".") ? String(other.dropLast()) : other
+        return text.isEmpty ? "Last session ended." : "Last session: \(text)."
+    }
+}

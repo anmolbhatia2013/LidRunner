@@ -4,6 +4,7 @@ import ServiceManagement
 import Network
 import IOKit.pwr_mgt
 import CoreGraphics
+import UserNotifications
 
 @main struct Main {
     static func main() {
@@ -27,7 +28,33 @@ final class AgentKeeper {
     var enabled: Bool { UserDefaults.standard.bool(forKey: app.defaultsKey) }
     func reset() { missingSince = nil; lastLaunch = nil; attempts = 0; launchError = nil }
 }
-final class AppDelegate: NSObject, NSApplicationDelegate {
+/// Writes the heartbeat on its own queue. The main thread reports in through `update`; an open
+/// menu, a modal picker or a slow system call no longer makes the helper think LidRunner died.
+final class HeartbeatWriter {
+    private let queue = DispatchQueue(label: "LidRunner.heartbeat", qos: .userInitiated)
+    private let path: String
+    private var timer: DispatchSourceTimer?
+    private var token: String?            // queue only
+    private var stop = false              // queue only
+    private var lastMainTick = 0.0        // queue only
+    init(path: String) { self.path = path }
+    func start() {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(250))
+        timer.setEventHandler { [weak self] in self?.write(now: Date().timeIntervalSince1970) }
+        timer.resume(); self.timer = timer
+    }
+    /// Main thread: record the current session (nil = none) and write immediately.
+    func update(token: String?, stop: Bool) {
+        let now = Date().timeIntervalSince1970
+        queue.sync { self.token = token; self.stop = stop; self.lastMainTick = now; self.write(now: now) }
+    }
+    private func write(now: Double) {
+        guard let token, heartbeatShouldContinue(now: now, lastMainTick: lastMainTick) else { return }
+        try? writeJSON(Heartbeat(token: token, time: now, stop: stop), path)
+    }
+}
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenuItemValidation, UNUserNotificationCenterDelegate {
     var item: NSStatusItem?
     var window: NSWindow!
     // Window controls (built in makeWindow)
@@ -43,6 +70,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let shortcutLabel = label("", size: 11, color: .secondaryLabelColor)
     let footerLabel = wrappingLabel("", size: 11, color: .tertiaryLabelColor)
     var agentRows: [Int: AgentRow] = [:]
+    var guardRow: GuardRow!
+    // Menu items refreshed each time the menu opens
+    var menuStatus: NSMenuItem!, menuToggle: NSMenuItem!, menuStartFor: NSMenuItem!, menuLogin: NSMenuItem!
+    var lastView = SessionView()
+    // Badges and Capture Guard presence are re-probed every few seconds, not on every tick.
+    var integrationCache: [Int: String] = [:]
+    var probedAt: Double = 0
+    var guardURL: URL?
+    let guardBundleID = "com.anmolbhatia.lidrunner.captureguard"
+    var selectedHours: Int { sessionSeconds(storedHours: UserDefaults.standard.integer(forKey: "sessionHours")) / 3600 }
     // --snapshot <png> [--appearance dark|light] [--demo idle|active|closed|error]: render the
     // window once and exit. Read-only: no heartbeat, diagnostics, launches, hotkey or login changes.
     lazy var snapshotPath: String? = argument("--snapshot")
@@ -70,12 +107,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var began = Date().timeIntervalSince1970
     var status: Status?
     var lastError: String?
+    var lastErrorAt: Double?
+    var lastErrorIsStart = true
+    var wasActive = false
+    var tickCount = 0
+    var lastAppend: Double?
+    var lastSampleFingerprint = ""
     var quitAfterStop = false
     let networkMonitor = NWPathMonitor()
     var networkAvailable = false
     let keepers = agentApps.map(AgentKeeper.init)
     var chatGPT: AgentKeeper { keepers[0] }
     let heartbeatPath = userDir.appendingPathComponent("heartbeat.json").path
+    lazy var heart = HeartbeatWriter(path: heartbeatPath)
+    var activity: NSObjectProtocol?
     let diagnosticsPath = userDir.appendingPathComponent("diagnostics.json").path
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -88,39 +133,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.networkAvailable = path.status == .satisfied }
         }
         networkMonitor.start(queue: DispatchQueue(label: "LidRunner.network"))
+        // A second copy (for example the build folder's app next to the installed one) would fight
+        // over the shortcut and the heartbeat. Hand over to the running copy instead.
+        if let id = Bundle.main.bundleIdentifier,
+           let other = NSRunningApplication.runningApplications(withBundleIdentifier: id).first(where: { $0 != NSRunningApplication.current }) {
+            if let url = other.bundleURL {
+                let configuration = NSWorkspace.OpenConfiguration(); configuration.createsNewApplicationInstance = false
+                NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, _ in exit(0) }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { exit(0) }
+            } else { exit(0) }
+            return
+        }
+        if Bundle.main.bundleIdentifier != nil { UNUserNotificationCenter.current().delegate = self }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.item = item
         item.button?.image = NSImage(systemSymbolName: "laptopcomputer", accessibilityDescription: "LidRunner")
         item.button?.title = ""
-        let menu = NSMenu()
-        menu.addItem(withTitle: "Show LidRunner", action: #selector(showWindow), keyEquivalent: "")
-        menu.addItem(withTitle: "Toggle 8-hour session (⌘⌥⌃⇧L)", action: #selector(toggleSession), keyEquivalent: "")
+        let menu = NSMenu(); menu.delegate = self
+        menuStatus = menu.addItem(withTitle: "LidRunner", action: nil, keyEquivalent: "")
         menu.addItem(.separator())
-        for hours in [1, 2, 4, 8] {
-            let entry = menu.addItem(withTitle: "Start \(hours)-hour session…", action: #selector(startMenu(_:)), keyEquivalent: "")
+        menuToggle = menu.addItem(withTitle: "Start session", action: #selector(toggleSession), keyEquivalent: "l")
+        menuToggle.keyEquivalentModifierMask = [.command, .option, .control, .shift]
+        let lengths = NSMenu()
+        for hours in sessionLengths {
+            let entry = lengths.addItem(withTitle: hours == 1 ? "1 hour" : "\(hours) hours", action: #selector(startMenu(_:)), keyEquivalent: "")
             entry.tag = hours * 3600; entry.target = self
         }
-
-        menu.addItem(withTitle: "Stop and restore normal sleep", action: #selector(stop), keyEquivalent: "")
+        menuStartFor = menu.addItem(withTitle: "Start for", action: nil, keyEquivalent: ""); menuStartFor.submenu = lengths
+        menu.addItem(withTitle: "Show LidRunner", action: #selector(showWindow), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "Open at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "").state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menuLogin = menu.addItem(withTitle: "Open at Login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "ChatGPT Remote setup guide", action: #selector(remoteGuide), keyEquivalent: "")
         menu.addItem(withTitle: "Claude Remote Control guide", action: #selector(claudeRemoteGuide), keyEquivalent: "")
         menu.addItem(withTitle: "Open diagnostics folder", action: #selector(openDiagnostics), keyEquivalent: "")
         menu.addItem(withTitle: "Computer-control diagnostic", action: #selector(diagnosticClick), keyEquivalent: "")
+        menu.addItem(.separator())
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+        menu.addItem(withTitle: "LidRunner \(version)".trimmingCharacters(in: .whitespaces), action: nil, keyEquivalent: "")
         menu.addItem(withTitle: "Quit LidRunner", action: #selector(quit), keyEquivalent: "q")
-        for entry in menu.items { entry.target = self }
+        for entry in menu.items where entry.action != nil { entry.target = self }
         item.menu = menu
         registerShortcut()
         if !UserDefaults.standard.bool(forKey: "loginConfigured") {
             do { try SMAppService.mainApp.register(); UserDefaults.standard.set(true, forKey: "loginConfigured") }
-            catch { lastError = "Open at Login could not be enabled. Use the menu to try again." }
+            catch { lastError = "Open at Login could not be enabled. Use the menu to try again."; lastErrorAt = Date().timeIntervalSince1970; lastErrorIsStart = false }
         }
-        makeWindow(); showWindow()
-        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
+        makeWindow()
+        // Stay in the background when macOS opened us at login or a test flag is driving the app.
+        let testing = CommandLine.arguments.contains("--start-verification")
+        let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        if testing { window.orderFront(nil) } else if !loginLaunch { showWindow() }
+        heart.start()
+        // Common modes: keep ticking while a menu or the session-length picker is open.
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
+        RunLoop.main.add(timer, forMode: .common); self.timer = timer
         tick()
-        if CommandLine.arguments.contains("--start-verification") {
+        if testing {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.begin(seconds: 300) }
+        }
+        // Regression check: hold the status menu open for N seconds during a session and
+        // report whether ticks continued. Used with --start-verification.
+        if let hold = argument("--test-menu-hold").flatMap(Double.init), hold > 0, hold <= 120 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 14) { [self] in
+                let closer = Timer(timeInterval: hold, repeats: false) { [weak self] _ in self?.item?.menu?.cancelTracking() }
+                RunLoop.main.add(closer, forMode: .common)
+                let opened = Date(), ticksBefore = tickCount
+                self.item?.button?.performClick(nil) // returns when the menu closes
+                print(String(format: "menu-hold: open %.1fs, ticks during hold %d, session %@",
+                             Date().timeIntervalSince(opened), tickCount - ticksBefore, request != nil ? "requested" : "none"))
+                fflush(stdout)
+            }
         }
     }
     func makeWindow() {
@@ -165,6 +247,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             agentRows[index] = row; agentViews.append(row)
         }
         if agentRows.isEmpty { agentViews.append(wrappingLabel("No ChatGPT, Claude, Gemini or Antigravity app found. Sessions still keep the Mac awake for command-line agents.")) }
+        guardRow = GuardRow(target: self, action: #selector(guardAction))
+        let divider = NSBox(); divider.boxType = .separator
+        agentViews += [divider, guardRow]
         let agents = Card(agentViews, spacing: 12)
         agentViews.forEach(agents.fill)
 
@@ -214,12 +299,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         stopButton.title = v.canStart ? "Stop" : "Stop session"
         stopButton.keyEquivalent = v.canStart ? "" : "\u{1b}"
         startButton.keyEquivalent = v.canStart ? "\r" : ""
-        shortcutLabel.stringValue = v.shortcutRegistered ? "⌘⌥⌃⇧L toggles 8 hours" : "⌘⌥⌃⇧L unavailable (conflict)"
+        shortcutLabel.stringValue = v.shortcutRegistered ? "⌘⌥⌃⇧L starts or stops" : "⌘⌥⌃⇧L unavailable (conflict)"
+        shortcutLabel.toolTip = "Starts a session of the selected length (\(v.hours) hour\(v.hours == 1 ? "" : "s")), or stops the current one"
         shortcutLabel.textColor = v.shortcutRegistered ? .secondaryLabelColor : .systemOrange
         for (index, row) in agentRows {
             let k = keepers[index]
-            row.update(running: k.running, launching: k.launching, error: k.launchError, enabled: k.enabled)
+            row.update(running: k.running, launching: k.launching, error: k.launchError, enabled: k.enabled, integration: integrationCache[index])
         }
+        guardRow.update(v.captureGuard)
+        lastView = v
         footerLabel.stringValue = "Stops automatically at 15% battery, high thermal pressure, the time limit, or if LidRunner quits. Keep the Mac ventilated and stop the session before putting it in a bag." + (v.loginEnabled ? "" : "  Open at Login is off.")
         fitWindow()
     }
@@ -231,6 +319,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             v.tone = .active; v.headline = "Session active · 6h 12m left"; v.remaining = 22320; v.total = 28800
             v.detail = "Safe to close the lid. Normal sleep returns at 21:30 or when you stop."
             v.canStart = false; v.canStop = true; v.lidClosed = demo == "closed"; v.power = Power(percent: demo == "closed" ? 22 : 64, ac: false)
+            v.captureGuard = demo == "closed" ? .ready("Watching 1 shared window") : .ready("Active · no shared windows yet")
+        case "idle": v.captureGuard = .ready("Ready · works when the lid is closed in a session")
+        case "guard": v.captureGuard = .needsPermission
         case "error":
             v.tone = .warning; v.headline = "Session not started"; v.error = "Another sleep override is already active, or the setting could not be read. LidRunner has not changed it."
         default: break
@@ -253,7 +344,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     @objc func durationChanged() { UserDefaults.standard.set(durationPopup.selectedTag(), forKey: "sessionHours") }
-    @objc func startSelected() { begin(seconds: max(1, min(8, durationPopup.selectedTag())) * 3600) }
+    @objc func startSelected() { begin(seconds: sessionSeconds(storedHours: durationPopup.selectedTag())) }
+    @objc func guardAction() {
+        switch lastView.captureGuard {
+        case .needsPermission:
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+        case .notRunning:
+            guard let guardURL else { return }
+            let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = false
+            NSWorkspace.shared.openApplication(at: guardURL, configuration: configuration, completionHandler: nil)
+        default: break
+        }
+    }
+    // MARK: Menu
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu === item?.menu else { return }
+        let running = request != nil
+        menuStatus.title = lastView.menuTitle
+        menuToggle.title = running ? "Stop session and restore sleep" : "Start \(selectedHours)-hour session"
+        menuStartFor.isHidden = running
+        menuLogin.state = SMAppService.mainApp.status == .enabled ? .on : .off
+    }
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(toggleSession): return !busy && !stopping
+        case #selector(startMenu(_:)): return !busy && request == nil
+        default: return true
+        }
+    }
+    // MARK: Notifications
+    func notifySessionEnded(_ reason: String) {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "LidRunner session ended"
+        content.body = lastSessionSentence(reason).replacingOccurrences(of: "Last session", with: "The session") + " Normal sleep is restored."
+        UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "session-ended", content: content, trigger: nil))
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list])
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        showWindow(); completionHandler()
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showWindow(); return true }
     @objc func remoteGuide() {
         NSWorkspace.shared.open(URL(string: "https://learn.chatgpt.com/docs/remote-connections")!)
@@ -303,17 +437,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
-    @objc func startDefault() { begin(seconds: 28800) }
+    // Shortcut and menu: stop the current session, or start one of the remembered length.
     @objc func toggleSession() {
         if request != nil && !busy { stop() }
-        else if request == nil && !busy { begin(seconds: 28800) }
+        else if request == nil && !busy { begin(seconds: selectedHours * 3600) }
     }
     @objc func toggleLogin(_ sender: NSMenuItem) {
         do {
             if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
             else { try SMAppService.mainApp.register() }
             sender.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        } catch { self.error("Could not change Open at Login: \(error.localizedDescription)") }
+        } catch { self.error("Could not change Open at Login: \(error.localizedDescription)", start: false) }
     }
     func registerShortcut() {
         var eventType = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
@@ -330,7 +464,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let result = RegisterEventHotKey(UInt32(kVK_ANSI_L), UInt32(cmdKey | optionKey | controlKey | shiftKey), id, GetApplicationEventTarget(), UInt32(kEventHotKeyExclusive), &hotKey)
         hotKeyRegistered = result == noErr
     }
-    @objc func startTest() { begin(seconds: 300) }
     @objc func startMenu(_ sender: NSMenuItem) { begin(seconds: sender.tag) }
     @objc func diagnosticClick() {
         testClicks += 1
@@ -348,9 +481,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func stop() {
         guard request != nil else { return }; stopping = true; heartbeat(); tick()
     }
-    func heartbeat() {
-        guard let r = request else { return }
-        try? writeJSON(Heartbeat(token: r.token, time: Date().timeIntervalSince1970, stop: stopping), heartbeatPath)
+    func heartbeat() { heart.update(token: request?.token, stop: stopping) }
+    // A session is user-initiated work: opt out of App Nap and timer throttling while one is wanted.
+    func updateActivity(wanted: Bool) {
+        if wanted, activity == nil {
+            activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: "LidRunner closed-lid session")
+        } else if !wanted, let token = activity { ProcessInfo.processInfo.endActivity(token); activity = nil }
     }
     func begin(seconds: Int) {
         guard !busy, request == nil else { return }
@@ -362,7 +498,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             error("A previous session is still restoring sleep. Wait a few seconds and retry."); return
         }
         let r = Request(token: UUID().uuidString, uid: getuid(), pid: getpid(), boot: bootID(), created: Date().timeIntervalSince1970, seconds: seconds, heartbeat: heartbeatPath)
-        request = r; busy = true; stopping = false; lastError = nil; heartbeat()
+        request = r; busy = true; stopping = false; lastError = nil; lastErrorAt = nil; wasActive = false; heartbeat()
+        // Ask once, in context: the only notification is "your session ended on its own".
+        if Bundle.main.bundleIdentifier != nil { UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in } }
         do {
             try writeJSON(r, userDir.appendingPathComponent("request.json").path)
             let config = HelperConfig(version: 2, uid: getuid(), requestPath: userDir.appendingPathComponent("request.json").path, heartbeatPath: heartbeatPath)
@@ -405,7 +543,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch { busy = false; authenticating = false; request = nil; self.error(error.localizedDescription) }
         tick()
     }
-    func error(_ message: String) { lastError = message; tick() }
+    func error(_ message: String, start: Bool = true) {
+        lastError = message; lastErrorAt = Date().timeIntervalSince1970; lastErrorIsStart = start
+        // A shortcut press with the window closed must not fail silently.
+        if start, !snapshotMode, window != nil, !window.isVisible { showWindow() }
+        tick()
+    }
     func updateAssertions(active: Bool) {
         if active && assertions.isEmpty {
             for kind in [kIOPMAssertionTypePreventUserIdleSystemSleep, kIOPMAssertionTypePreventUserIdleDisplaySleep] {
@@ -416,19 +559,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func tick() {
         let now = Date().timeIntervalSince1970
+        tickCount += 1
         if !snapshotMode { maximumGap = max(maximumGap, now - lastTick); lastTick = now; heartbeat() }
         status = readJSON(Status.self, systemDir + "/status.json")
         let mine = status?.token == request?.token && request != nil
         let active = mine && status?.phase == "active" && now - (status?.updated ?? 0) < 10
         if !snapshotMode {
+            if active { wasActive = true }
             if mine && ["stopped", "failed"].contains(status?.phase ?? "") && !busy {
-                request = nil; stopping = false
+                if let notice = sessionEndNotice(wasActive: wasActive, phase: status?.phase ?? "", reason: status?.reason ?? "", userStopping: stopping || quitAfterStop) {
+                    notifySessionEnded(notice)
+                }
+                request = nil; stopping = false; wasActive = false
                 if quitAfterStop { updateAssertions(active: false); NSApp.terminate(nil); return }
             }
             if request != nil && !busy && !active && now - (request?.created ?? now) > 310 && !mine {
                 request = nil; lastError = "Helper did not report a session. Check diagnostics before closing the lid."
+                lastErrorAt = now; lastErrorIsStart = true
             }
             updateAssertions(active: active)
+            updateActivity(wanted: request != nil)
         }
         let p = power(), closed = rootProperty("AppleClamshellState") ?? false
         if closed { closedSamples += 1 }
@@ -459,20 +609,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             v.remaining = remaining; v.total = request?.seconds
         } else {
             v.headline = "Ready"
-            if status?.phase == "stopped" { v.detail = "Last session: \(status!.reason.lowercased()). Start one before closing the lid." }
+            if status?.phase == "stopped" { v.detail = lastSessionSentence(status!.reason) + " Start a new one before closing the lid." }
             else if status?.phase == "failed" { v.tone = .warning; v.detail = status!.reason }
             else { v.detail = "Start a session before closing the lid. The Mac then stays awake on charger or battery." }
         }
+        if lastError != nil, !errorStillRelevant(now: now, shownAt: lastErrorAt) { lastError = nil; lastErrorAt = nil }
         v.error = lastError
-        if lastError != nil, !active, !busy, !stopping { v.tone = .warning; v.headline = "Session not started" }
+        if lastError != nil, !active, !busy, !stopping {
+            v.tone = .warning
+            if lastErrorIsStart { v.headline = "Session not started" }
+        }
+        v.hours = selectedHours
+        if now - probedAt >= 6 || now < probedAt {
+            probedAt = now
+            for (index, row) in agentRows { integrationCache[index] = row.integrationProbe?() }
+            guardURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: guardBundleID)
+        }
+        let guardReport = (try? Data(contentsOf: userDir.appendingPathComponent("capture-guard.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        v.captureGuard = captureGuardState(installed: guardURL != nil, report: guardReport, now: now)
         applyDemo(&v)
         render(v)
         if snapshotMode { return }
+        menuStatus?.title = v.menuTitle // stays live while the menu is open
         item?.button?.title = active ? " \(duration(remaining))" : ""
         item?.button?.toolTip = active ? "LidRunner session active · \(duration(remaining)) left" : "LidRunner"
         let diagnostic: [String: Any] = ["time": now, "started": began, "lidClosed": closed, "activeDisplays": count, "chatGPTRunning": chatRunning, "closedSamples": closedSamples, "largestSamplingGapSeconds": maximumGap, "controlTestClicks": testClicks, "closedControlTestClicks": closedControlClicks, "phase": status?.phase ?? "idle", "reason": status?.reason ?? "", "onCharger": p.ac, "batteryPercent": p.percent ?? -1, "sleepDisabled": rootProperty("SleepDisabled") ?? false, "thermalState": ProcessInfo.processInfo.thermalState.rawValue, "shortcutRegistered": hotKeyRegistered, "networkLinkAvailable": networkAvailable, "keepChatGPTAvailable": chatGPT.enabled, "chatGPTLaunchAttempts": chatGPT.attempts, "chatGPTLaunching": chatGPT.launching, "agentApps": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.running) }), "agentKeepAlive": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.enabled) }), "agentLaunchAttempts": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.attempts) }), "phoneConnectionVerifiedByMonitor": false, "loginEnabled": login, "shortcut": "Command-Option-Control-Shift-L"]
         if let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys]) {
             try? data.write(to: URL(fileURLWithPath: diagnosticsPath), options: .atomic)
+            // Session samples are evidence; idle samples are only state changes plus one a minute.
+            let fingerprint = "\(status?.phase ?? "idle")|\(closed)|\(p.ac)|\(rootProperty("SleepDisabled") ?? false)|\(ProcessInfo.processInfo.thermalState.rawValue)|\(networkAvailable)|\(count)|\(keepers.map { $0.running ? "1" : "0" }.joined())"
+            guard shouldAppendSample(now: now, lastAppend: lastAppend, sessionActive: active || request != nil, changed: fingerprint != lastSampleFingerprint) else { return }
+            lastAppend = now; lastSampleFingerprint = fingerprint
             let log = userDir.appendingPathComponent("verification.jsonl")
             if let size = (try? FileManager.default.attributesOfItem(atPath: log.path))?[.size] as? NSNumber, size.intValue > 10_000_000 {
                 let old = userDir.appendingPathComponent("verification.previous.jsonl")

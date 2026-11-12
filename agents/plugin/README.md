@@ -21,7 +21,7 @@ The Codex installer replaces the same-named user skill; back up customizations f
 
 ## Privacy and scope
 
-The hook never approves, denies, or rewrites a tool call. It caches a hashed session identifier and host-state fingerprint under `~/Library/Caches/LidRunner/`; it does not store prompts, tool input, transcripts, or document contents. Closed-lid state grants no additional permissions.
+The hook never approves, denies, or rewrites a tool call. It caches a hashed session identifier and host-state fingerprint under `~/Library/Caches/LidRunner/`; it does not store prompts, tool input, transcripts, or document contents. State for sessions idle longer than a day is deleted automatically. Closed-lid state grants no additional permissions.
 
 `LIDRUNNER_SIMULATE_LID=closed` or `open` enables clearly labeled test state. Simulation is not evidence of physical closed-lid operation. Local unit tests and opt-in live integration tests live in the parent repository, not this standalone plugin package.
 

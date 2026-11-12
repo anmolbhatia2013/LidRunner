@@ -9,10 +9,11 @@ A macOS menu-bar app for time-limited closed-lid work sessions on a MacBook, on 
 ## Features
 
 - Manual 1-, 2-, 4-, or 8-hour sessions, with a menu-bar countdown.
-- **Command–Option–Control–Shift–L** (⌘⌥⌃⇧L) starts an eight-hour session or stops the current session.
+- **Command–Option–Control–Shift–L** (⌘⌥⌃⇧L) starts a session of the selected length (eight hours by default) or stops the current session.
+- A notification explains any session that ends on its own (time limit, battery, heat), so a Mac found asleep is never a mystery.
 - A bounded privileged helper restores normal sleep on expiry, app exit, stale heartbeat, low battery, or serious thermal pressure.
 - Optional keep-alive for installed agent apps, without force-quitting running apps.
-- Optional **Capture Guard** companion for a specific shared-window screenshot-clipping workaround.
+- Optional **Capture Guard** companion for a specific shared-window screenshot-clipping workaround. The main window shows whether it is running and has its permission.
 - Read-only agent skills and lifecycle hooks that report lid and session state.
 
 ## Requirements
@@ -28,28 +29,21 @@ Development testing was performed on Apple silicon with macOS 27.2. The app decl
 ```sh
 git clone https://github.com/anmolbhatia2013/LidRunner.git
 cd LidRunner
-./build.sh
-mkdir -p "$HOME/Applications"
-if [ -e "$HOME/Applications/LidRunner.app" ]; then
-  printf '%s\n' 'Already installed. Stop the session and quit LidRunner before upgrading.'
-else
-  ditto build/LidRunner.app "$HOME/Applications/LidRunner.app"
-  open "$HOME/Applications/LidRunner.app"
-fi
+./install.sh
 ```
 
-`./build.sh` compiles the app and helper, runs the power-policy tests, and verifies their ad-hoc signatures. Use `./build.sh --build-only` to skip tests. Build output is kept in `build/` and is not committed.
+`./install.sh` builds the app and helper, runs the power-policy tests, installs or upgrades `~/Applications/LidRunner.app`, and opens it. It refuses to run while a session is active, and it quits a running copy before replacing it. Add `--capture-guard` to install or upgrade the companion too, or `--no-launch` to skip opening the app.
 
-The copy command is intended for a first installation. Before replacing an existing installation, stop its session and quit the app.
+`./build.sh` alone compiles and tests without installing (`--build-only` skips the tests). Build output is kept in `build/` and is not committed.
 
 ## Use
 
-1. Open LidRunner and select a session length, or use **⌘⌥⌃⇧L** for eight hours.
+1. Open LidRunner, select a session length and choose **Start session**, or press **⌘⌥⌃⇧L** to start one of the selected length. The choice is remembered; it starts at eight hours.
 2. On first use, approve the normal macOS administrator prompt to install the narrowly scoped helper. No password is stored.
 3. Wait for **Session active** before closing the lid.
 4. Choose **Stop session** or press the shortcut again to restore normal sleep early.
 
-Closing the app window does not stop the session; quitting the menu-bar app does. Login launch can be controlled from the app's menu. Opening the app does not automatically start a power session.
+Closing the app window does not stop the session; quitting the menu-bar app does. If a start fails while the window is closed (for example from the shortcut), the window opens to show why. The first session asks for permission to send one kind of notification: a session that ended without you stopping it. Login launch can be controlled from the app's menu. Opening the app does not automatically start a power session.
 
 Keep-alive preferences appear for installed apps. ChatGPT may be opened during a session even if it was initially closed; other supported apps are reopened only if they were seen running earlier in that session. Retries use a 15-second debounce, at least 60 seconds between attempts, and a three-attempt cap. No app is signed in or granted permissions automatically.
 
@@ -95,13 +89,15 @@ See [agents/README.md](agents/README.md) for the shared skill and plugin, instal
 python3 agents/tests/test_closed_lid_skill.py
 ```
 
-Historical local testing included short charger/battery lid-close sessions, background execution, app input, a phone-to-host ChatGPT Remote interaction, and Calculator screenshot recovery. Those observations are not a reliability guarantee or proof of compatibility with arbitrary apps. Long overnight runs, reboot/crash recovery, low-battery and high-temperature cutoffs, and closed-lid Claude/Antigravity remote transport have not all been physically exercised.
+Historical local testing included short charger/battery lid-close sessions, background execution, app input, a phone-to-host ChatGPT Remote interaction, and Calculator screenshot recovery. In normal use on 10 November 2026, a closed-lid battery session ran for about two and a half hours and the helper restored sleep at the 15% cutoff. Those observations are not a reliability guarantee or proof of compatibility with arbitrary apps. Full eight-hour runs, reboot/crash recovery, the high-temperature cutoff, and closed-lid Claude/Antigravity remote transport have not been physically exercised.
+
+GitHub Actions runs the three commands above on every push and pull request.
 
 Local evidence logs and installation records are intentionally excluded from this repository. Automated policy tests do not substitute for real-device verification.
 
 ## Privacy and local files
 
-The macOS app sends no network requests. Diagnostics describe power/session/display state, not document contents, task prompts, or screenshots.
+The macOS app sends no network requests. Diagnostics describe power/session/display state, not document contents, task prompts, or screenshots. The sampling history (`verification.jsonl`, rotated at 10 MB) records every two-second sample during a session, and otherwise only state changes plus one sample a minute.
 
 - App source: `Sources/`
 - Policy tests: `Tests/`

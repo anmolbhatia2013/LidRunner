@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: |
+          for script in build.sh build-capture-guard.sh install.sh install-capture-guard.sh uninstall.sh agents/install.sh agents/e2e.sh; do
+            bash -n "$script"
+          done
+
+      - name: Build LidRunner and run power-policy checks
+        run: ./build.sh
+
+      - name: Build Capture Guard and run capture-policy checks
+        run: ./build-capture-guard.sh
+
+      - name: Agent skill and hook tests (no model requests)
+        run: /usr/bin/python3 agents/tests/test_closed_lid_skill.py
+
+      - name: Plugin manifests are valid JSON with matching versions
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import json, pathlib
+          root = pathlib.Path('agents')
+          claude = json.loads((root / 'plugin/.claude-plugin/plugin.json').read_text())
+          antigravity = json.loads((root / 'plugin/plugin.json').read_text())
+          for name in ('.claude-plugin/marketplace.json', 'plugin/hooks/hooks.json', 'plugin/hooks.json'):
+              json.loads((root / name).read_text())
+          assert claude['version'] == antigravity['version'], (claude['version'], antigravity['version'])
+          assert claude['name'] == antigravity['name'] == 'lidrunner'
+          print('plugin', claude['version'])
+          PY

@@ -142,16 +142,54 @@ final class AgentRow: NSView {
                                      row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor)])
     }
     required init?(coder: NSCoder) { nil }
-    func update(running: Bool, launching: Bool, error: String?, enabled: Bool) {
+    /// `integration` is the cached badge text from `presentation.integration()`; the caller
+    /// refreshes it every few seconds rather than re-reading config files on every tick.
+    var integrationProbe: (() -> String?)? { presentation?.integration }
+    func update(running: Bool, launching: Bool, error: String?, enabled: Bool, integration: String?) {
         dot.contentTintColor = running ? .systemGreen : (launching ? .systemOrange : .tertiaryLabelColor)
         let status = error.map { "Couldn't open: \($0)" } ?? (running ? "Running" : (launching ? "Opening…" : "Not running"))
         state.stringValue = [status, presentation?.remote].compactMap { $0 }.joined(separator: " · ")
         state.textColor = error == nil ? .secondaryLabelColor : .systemRed
-        let integration = presentation?.integration()
         badge.stringValue = integration.map { "✓ " + $0 } ?? ""
         badge.isHidden = integration == nil
         badge.toolTip = integration.map { "\($0) installed: the agent is told when the lid closes" }
         toggle.state = enabled ? .on : .off
+    }
+}
+
+/// Optional Capture Guard companion: one line of state, plus a button only when it needs you.
+final class GuardRow: NSView {
+    let button = NSButton(title: "", target: nil, action: nil)
+    private let dot = symbol("circle.fill", size: 7, color: .tertiaryLabelColor)
+    private let state = label("", size: 11, color: .secondaryLabelColor)
+    init(target: AnyObject, action: Selector) {
+        super.init(frame: .zero)
+        let icon = symbol("macwindow.on.rectangle", size: 19, weight: .regular, color: .secondaryLabelColor)
+        icon.widthAnchor.constraint(equalToConstant: 30).isActive = true; icon.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        let name = label("Capture Guard", size: 13, weight: .semibold)
+        let text = vstack([name, hstack([dot, state], spacing: 5)], spacing: 2)
+        button.bezelStyle = .rounded; button.controlSize = .small; button.target = target; button.action = action
+        let row = hstack([icon, text, spacer(), button], spacing: 10)
+        row.translatesAutoresizingMaskIntoConstraints = false; addSubview(row)
+        NSLayoutConstraint.activate([row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
+                                     row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor)])
+        toolTip = "Optional companion that re-centres remotely controlled windows so screenshots aren't clipped while the lid is closed"
+    }
+    required init?(coder: NSCoder) { nil }
+    func update(_ guardState: GuardState) {
+        isHidden = guardState == .notInstalled
+        var text = "", tint = NSColor.tertiaryLabelColor, action: String? = nil, warn = false
+        switch guardState {
+        case .notInstalled: break
+        case .notRunning: text = "Not running · screenshots may be clipped with the lid closed"; tint = .systemOrange; action = "Open"; warn = true
+        case .needsPermission: text = "Needs Accessibility permission to re-centre windows"; tint = .systemOrange; action = "Open Settings…"; warn = true
+        case .paused: text = "Paused from its menu-bar icon"; tint = .tertiaryLabelColor
+        case .ready(let detail): text = detail; tint = .systemGreen
+        }
+        dot.contentTintColor = tint; state.stringValue = text
+        state.textColor = warn ? .systemOrange : .secondaryLabelColor
+        button.isHidden = action == nil; button.title = action ?? ""
+        setAccessibilityLabel("Capture Guard: \(text)")
     }
 }
 
@@ -172,6 +210,10 @@ struct SessionView {
     var canStop = false
     var shortcutRegistered = true
     var loginEnabled = true
+    var captureGuard = GuardState.notInstalled
+    var hours = 8
+    /// One line for the menu-bar menu.
+    var menuTitle: String { tone == .idle ? "LidRunner · no session" : headline }
 }
 
 func duration(_ seconds: Int) -> String {

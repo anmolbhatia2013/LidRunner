@@ -10,7 +10,7 @@ The root launch daemon accepts only JSON session requests from the one administr
 
 Before enabling `disablesleep`, the helper requires its baseline to be zero and persists an active journal. Restoration is zero, preserving the accepted baseline. If someone else's sleep override is already active, the request fails without taking ownership. A restarted helper restores a prior active/restoring journal before processing anything else. The completed token suppresses accidental resumption of a stale request. Sleep recovery is retried on helper launch failure by launchd.
 
-The session deadline is checked against wall time plus a monotonic upper bound. The app sends a heartbeat every two seconds; the daemon stops after a 20-second heartbeat loss, app process exit, low battery, serious/critical thermal state, or deadline. The daemon checks these conditions every two seconds. Closing the app window has no effect; quitting the app requests restoration. ChatGPT process visibility is informational only. A transient missing-process observation must not disable the sleep session.
+The session deadline is checked against wall time plus a monotonic upper bound. The app sends a heartbeat every two seconds, from a dedicated queue since 1.4 (see below); the daemon stops after a 20-second heartbeat loss, app process exit, low battery, serious/critical thermal state, or deadline. The daemon checks these conditions every two seconds. Closing the app window has no effect; quitting the app requests restoration. ChatGPT process visibility is informational only. A transient missing-process observation must not disable the sleep session.
 
 ## Actual evidence
 
@@ -59,3 +59,17 @@ A separately signed Capture Guard app and per-user LaunchAgent now automate the 
 The hook script is host-agnostic: Codex and Claude Code share the `hookSpecificOutput.additionalContext` contract; Antigravity uses `injectSteps` with `ephemeralMessage` on `PreInvocation`, and its per-turn detection uses the integer `initialNumSteps` (observed live: 1, then 3 on the following turn). Antigravity's `PreToolUse` requires an allow/deny decision, so it is deliberately not registered. Without `--host`, the script behaves as before for Codex, so the existing `~/.codex/hooks.json` command and its trust are untouched.
 
 Live checks on 6 November: Codex app-server (0.162.1) listed the updated skill and reported all four hooks trusted; a headless Claude Code run executed the plugin hook, but a model response was not verified; a headless Antigravity run executed the hook and the model reported the skill and rule loaded. No closed-lid physical test of the Claude or Antigravity paths has been performed.
+
+## Heartbeat and run-loop fix (1.4)
+
+A 1.3 session on 10 November ended after 96 minutes with "LidRunner heartbeat lost" while the helper and the Mac were healthy: the app had stopped sampling for 134 seconds. The cause is that 1.3 drove its heartbeat from `Timer.scheduledTimer`, which only fires in the default run-loop mode. AppKit switches modes while a menu, the session-length pop-up, or a window drag is tracking, so the heartbeat paused for as long as a menu stayed open, and the helper restored sleep after 20 seconds. A scratch experiment confirmed the mechanism (default-mode timer: 0 fires during menu tracking; common-mode timer: fired normally).
+
+1.4 changes three things:
+
+- The tick timer is added to the common run-loop modes, in both LidRunner and Capture Guard.
+- `HeartbeatWriter` writes the heartbeat from its own dispatch queue. The main thread reports the current token and stop flag on every tick; the writer keeps going through UI stalls shorter than `mainThreadStallLimit` (ten minutes) and then stops, so a hung app still cannot hold the Mac awake to the deadline. The helper's own deadline, battery, thermal and process-exit checks are unchanged.
+- While a session is requested the app holds a `ProcessInfo` user-initiated activity, which opts it out of App Nap and timer throttling.
+
+Verification: `LidRunner --start-verification --test-menu-hold 30` starts a five-minute session and holds the status menu open for 30 seconds. On 11 November the menu stayed open 30.3 seconds, 15 ticks ran during the hold, the heartbeat was never older than 2 seconds, and the session stayed active. The helper binary was not changed or reinstalled.
+
+Other 1.4 behaviour: a second copy of the app hands over to the running one and exits; the shortcut starts the remembered session length; start errors open the window and expire after two minutes; idle sampling writes are throttled (`shouldAppendSample`); Capture Guard writes its status file on change or every three seconds instead of every second; a session that ends on its own posts a local notification (`sessionEndNotice`). All of these decisions are pure functions in `Core.swift` with checks in `Tests/PolicyTests.swift` (67 checks).

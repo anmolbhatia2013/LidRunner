@@ -22,6 +22,11 @@ SKILL = Path(__file__).resolve().parents[1] / 'SKILL.md'
 CACHE_ROOT = Path.home() / 'Library/Caches/LidRunner'
 HOSTS = ('codex', 'claude', 'antigravity')
 MAX_INPUT = 8 * 1024 * 1024
+# Every agent session leaves a small state file, and headless agents can start hundreds of
+# sessions a day. Forget sessions idle for a day (a forgotten session just behaves like a new
+# one), checking at most hourly so the common path stays one stat() call.
+PRUNE_AFTER = 24 * 3600
+PRUNE_EVERY = 3600
 
 # Claude Code and Codex share an event schema. Antigravity names its own events and
 # sends no event name in the payload, so its hooks.json passes --event.
@@ -91,6 +96,7 @@ def run(event, state, cache=None, host='codex', event_name=None):
     # IDs are hashed before use in paths. Never retain input, transcript, cwd, or prompt.
     key = hashlib.sha256(session.encode()).hexdigest()
     cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    prune(cache)
     path = cache / (key + '.json')
     lock_path = cache / (key + '.lock')
     with lock_path.open('a') as lock:
@@ -123,6 +129,46 @@ def run(event, state, cache=None, host='codex', event_name=None):
         if state.get('simulated'):
             text = '[SIMULATED TEST STATE, not the real lid] ' + text
         return render(host, name, text)
+
+
+def prune(cache, now=None):
+    """Remove state for sessions idle longer than PRUNE_AFTER. Only touches our own files."""
+    now = time.time() if now is None else now
+    marker = cache / '.pruned'
+    try:
+        if now - marker.stat().st_mtime < PRUNE_EVERY:
+            return 0
+    except OSError:
+        pass
+    removed = 0
+    try:
+        marker.touch()
+        os.utime(marker, (now, now))
+        entries = list(os.scandir(cache))
+    except OSError:
+        return 0
+    fresh = set()
+    for entry in entries:  # a session is as fresh as its state file
+        name = entry.name
+        if name.endswith('.json') and len(name) == 69:
+            try:
+                if now - entry.stat(follow_symlinks=False).st_mtime < PRUNE_AFTER:
+                    fresh.add(name[:64])
+            except OSError:
+                fresh.add(name[:64])
+    for entry in entries:
+        name, stem = entry.name, entry.name[:64]
+        ours = len(stem) == 64 and all(c in '0123456789abcdef' for c in stem) and name[64:] in ('.json', '.lock')
+        if not ours or stem in fresh or not entry.is_file(follow_symlinks=False):
+            continue
+        try:
+            if name.endswith('.lock') and now - entry.stat(follow_symlinks=False).st_mtime < PRUNE_AFTER:
+                continue  # a session that is just starting
+            os.unlink(entry.path)
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def parse_args(argv):

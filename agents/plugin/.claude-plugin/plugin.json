@@ -1,6 +1,6 @@
 {
   "name": "lidrunner",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "description": "Closed-lid and phone-remote awareness for LidRunner on this Mac: live lid/power/capture status, screenshot recovery guidance, and lifecycle notices when the lid closes.",
   "author": {
     "name": "Anmol Bhatia"

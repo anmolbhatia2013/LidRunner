@@ -32,7 +32,7 @@ The installer runs local tests first, then updates user-level integrations for t
 - `plugin/skills/closed-lid-mode/scripts/status.py`: read-only lid/power/Capture Guard/agent-app status.
 - `plugin/skills/closed-lid-mode/scripts/hook.py`: lifecycle hook. `--host codex` (default), `--host claude`, or `--host antigravity --event PreInvocation`.
 - `.claude-plugin/marketplace.json`: local Claude Code marketplace `lidrunner-local`.
-- `tests/test_closed_lid_skill.py`: 60 tests across status, simulation, Codex, Claude, Antigravity and CLI paths. Set `LIDRUNNER_SKILL_SCRIPTS` to test an installed copy.
+- `tests/test_closed_lid_skill.py`: 66 tests across status, simulation, cache pruning, Codex, Claude, Antigravity and CLI paths. Set `LIDRUNNER_SKILL_SCRIPTS` to test an installed copy.
 - `install.sh [codex] [claude] [antigravity]`: run the tests, then install or refresh.
 - `plugin/assets/icon.png`: plugin icon for both Claude Code and Antigravity.
 
@@ -47,11 +47,11 @@ The installer runs local tests first, then updates user-level integrations for t
 - Claude Code: **HOOK**. The debug log showed context parsed at SessionStart and UserPromptSubmit. A model response was not verified.
 - Codex: **HOOK**. Trusted SessionStart and UserPromptSubmit hooks ran and recorded the simulated closed state. A model response was not verified.
 
-This script is an opt-in live integration test, not a unit test: it makes authenticated model requests, can consume usage allowance, clears the Codex hook cache, and writes local diagnostic logs. It requires a `timeout` command, which stock macOS does not include. Evidence logs are not published.
+This script is an opt-in live integration test, not a unit test: it makes authenticated model requests, can consume usage allowance, clears the Codex hook cache, and writes local diagnostic logs. Evidence logs are not published.
 
 ## Hook behaviour
 
-The hook reads host state only. It never approves, denies or rewrites a tool call; for Antigravity it registers no `PreToolUse` hook because that event requires a decision. It caches a hashed session id, a state fingerprint and (Antigravity only) the integer turn marker under `~/Library/Caches/LidRunner/<host>-hooks/`. It never stores prompts, tool input, transcripts or paths. Open-lid sessions stay quiet; a closed lid is announced at session/turn start and on any state change.
+The hook reads host state only. It never approves, denies or rewrites a tool call; for Antigravity it registers no `PreToolUse` hook because that event requires a decision. It caches a hashed session id, a state fingerprint and (Antigravity only) the integer turn marker under `~/Library/Caches/LidRunner/<host>-hooks/`. It never stores prompts, tool input, transcripts or paths. State for sessions idle longer than a day is deleted (checked at most hourly), so the cache stays small even with hundreds of headless sessions a day; a forgotten session simply behaves like a new one. Open-lid sessions stay quiet; a closed lid is announced at session/turn start and on any state change.
 
 ## Remove
 
