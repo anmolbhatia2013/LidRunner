@@ -67,6 +67,19 @@ class StatusTests(unittest.TestCase):
   self.diag['agentApps']={'claude':True}
   self.assertIsNone(self.result(now=120)['agent_apps_running'])
 
+
+ def test_session_kind_charger_hold(self):
+  self.diag['sessionKind']='charger'; self.diag['onCharger']=True
+  r=self.result(); self.assertEqual(r['session_kind'],'charger'); self.assertNotIn('charger_hold_ends_two_minutes_after_unplugging',r['alerts'])
+  self.diag['onCharger']=False
+  self.assertIn('charger_hold_ends_two_minutes_after_unplugging',self.result()['alerts'])
+ def test_session_kind_untrusted_or_inactive(self):
+  self.diag['sessionKind']='ATTACKER'; self.assertIsNone(self.result()['session_kind'])
+  self.diag['sessionKind']='timed'; self.assertEqual(self.result()['session_kind'],'timed')
+  self.root['phase']='stopped'; self.assertIsNone(self.result()['session_kind'])
+ def test_rustdesk_reported(self):
+  self.diag['agentApps']={'rustdesk':True}; self.assertEqual(self.result()['agent_apps_running'],{'rustdesk':True})
+
 class HookTests(unittest.TestCase):
  HOST='codex'
  def setUp(self):

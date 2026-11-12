@@ -10,7 +10,7 @@ import Darwin
         if var prior = readJSON(Status.self, statusPath), ["active", "restoring"].contains(prior.phase) {
             restore(&prior, "Recovered interrupted session", statusPath)
         }
-        guard let config = readJSON(HelperConfig.self, systemDir + "/config.json"), config.version == 2, config.uid >= 501 else { exit(1) }
+        guard let config = readJSON(HelperConfig.self, systemDir + "/config.json"), (2...3).contains(config.version), config.uid >= 501 else { exit(1) }
         while true {
             if var r = safeRead(Request.self, config.requestPath, config.uid) {
                 // The administrator-approved configuration fixes every user-controlled path.
@@ -28,7 +28,8 @@ import Darwin
         let now = Date().timeIntervalSince1970
         var s = Status(token: r.token, phase: "failed", reason: "Session request expired or invalid", updated: now, deadline: r.created + Double(r.seconds), previous: 0)
         func save() { try? writeJSON(s, statusPath) }
-        guard r.boot == bootID(), r.uid == uid, r.pid > 1, r.seconds >= 30, r.seconds <= 28800,
+        let acOnly = r.acOnly == true
+        guard r.boot == bootID(), r.uid == uid, r.pid > 1, r.seconds >= 30, r.seconds <= maxSessionSeconds(acOnly: acOnly),
               now - r.created < 300, now >= r.created, UUID(uuidString: r.token) != nil else { save(); return }
         guard sleepDisabled() == 0 else {
             s.reason = "Sleep is already disabled, or its setting could not be read. No changes made."; save(); return
@@ -37,17 +38,25 @@ import Darwin
                                    alive: kill(r.pid, 0) == 0, battery: power(), thermal: ProcessInfo.processInfo.thermalState.rawValue) {
             s.reason = reason; save(); return
         }
-        s.phase = "active"; s.reason = "Closed-lid sleep override enabled"
+        if acOnly && !power().ac { s.reason = "Stay reachable needs the charger"; save(); return }
+        s.phase = "active"; s.reason = acOnly ? "Staying reachable on charger" : "Closed-lid sleep override enabled"
         do { try writeJSON(s, statusPath) } catch { exit(1) }
         guard run("/usr/bin/pmset", ["-a", "disablesleep", "1"]).0 == 0, sleepDisabled() == 1 else {
             restore(&s, "Could not enable closed-lid override", statusPath); return
         }
         let monotonicDeadline = ProcessInfo.processInfo.systemUptime + Double(r.seconds)
+        var unpluggedSince: Double?
         while true {
             let t = Date().timeIntervalSince1970
+            let battery = power()
             let reason = stopReason(now: t, deadline: s.deadline, heartbeat: safeRead(Heartbeat.self, r.heartbeat, uid), token: r.token,
-                                    alive: kill(r.pid, 0) == 0, battery: power(), thermal: ProcessInfo.processInfo.thermalState.rawValue)
+                                    alive: kill(r.pid, 0) == 0, battery: battery, thermal: ProcessInfo.processInfo.thermalState.rawValue)
             if let reason { restore(&s, reason, statusPath); return }
+            // A charger-only session ends by itself shortly after the charger is disconnected.
+            if battery.ac { unpluggedSince = nil } else if unpluggedSince == nil || t < unpluggedSince! { unpluggedSince = t }
+            if let reason = standbyStopReason(acOnly: acOnly, onCharger: battery.ac, unpluggedFor: unpluggedSince.map { t - $0 }) {
+                restore(&s, reason, statusPath); return
+            }
             if ProcessInfo.processInfo.systemUptime >= monotonicDeadline { restore(&s, "Session timer finished", statusPath); return }
             if rootProperty("SleepDisabled") != true { restore(&s, "Power setting changed outside LidRunner", statusPath); return }
             s.updated = t; save(); Thread.sleep(forTimeInterval: 2)

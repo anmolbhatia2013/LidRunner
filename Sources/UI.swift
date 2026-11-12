@@ -64,6 +64,11 @@ final class Card: NSBox {
     }
     required init?(coder: NSCoder) { nil }
     func fill(_ view: NSView) { view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+    /// Replace the card's rows (used when an app is added or removed).
+    func setViews(_ views: [NSView]) {
+        for view in stack.arrangedSubviews { stack.removeArrangedSubview(view); view.removeFromSuperview() }
+        for view in views { stack.addArrangedSubview(view); fill(view) }
+    }
 }
 
 /// Icon + text pill used for power, lid, network and thermal readouts.
@@ -92,6 +97,7 @@ final class Chip: NSView {
 /// Per-agent presentation details that don't belong in the policy layer.
 struct AgentPresentation {
     let remote: String
+    var tip = "installed: the agent is told when the lid closes"
     let integration: () -> String?
 }
 let agentPresentation: [String: AgentPresentation] = [
@@ -109,6 +115,10 @@ let agentPresentation: [String: AgentPresentation] = [
     "antigravity": AgentPresentation(remote: "Phone: agy remote-control") {
         FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.gemini/config/plugins/lidrunner/plugin.json") ? "Gemini plugin" : nil
     },
+    // RustDesk's own service keeps it reachable at the login screen; LidRunner keeps the Mac awake for it.
+    "rustdesk": AgentPresentation(remote: "Phone: RustDesk app", tip: "is installed, so RustDesk can connect without anyone at the Mac") {
+        FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/com.carriez.RustDesk_service.plist") ? "Unattended service" : nil
+    },
 ]
 
 /// One agent: app icon, name, live state, LidRunner skill/plugin badge, keep-alive switch.
@@ -118,8 +128,10 @@ final class AgentRow: NSView {
     private let state = label("", size: 11, color: .secondaryLabelColor)
     private let badge = label("", size: 10, weight: .semibold, color: .systemGreen)
     private let presentation: AgentPresentation?
-    init(app: AgentApp, url: URL?, index: Int, target: AnyObject, action: Selector) {
+    private let custom: Bool
+    init(app: AgentApp, url: URL?, index: Int, target: AnyObject, action: Selector, removeAction: Selector? = nil) {
         presentation = agentPresentation[app.key]
+        custom = app.custom
         super.init(frame: .zero)
         let icon = NSImageView()
         icon.image = url.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? NSImage(systemSymbolName: "app", accessibilityDescription: nil)
@@ -136,7 +148,15 @@ final class AgentRow: NSView {
                                                : "Reopen \(app.name) if it quits during a session (never opens it otherwise)"
         toggle.setAccessibilityLabel(app.launchIfNeverSeen ? "Keep \(app.name) running" : "Reopen \(app.name) if it quits")
         let keepLabel = label(app.launchIfNeverSeen ? "Keep running" : "Reopen if quit", size: 11, color: .secondaryLabelColor)
-        let row = hstack([icon, text, spacer(), keepLabel, toggle], spacing: 10)
+        var views: [NSView] = [icon, text, spacer()]
+        if app.custom, let removeAction {
+            let remove = NSButton(image: NSImage(systemSymbolName: "minus.circle", accessibilityDescription: "Remove")!, target: target, action: removeAction)
+            remove.isBordered = false; remove.tag = index; remove.contentTintColor = .tertiaryLabelColor
+            remove.toolTip = "Remove \(app.name) from LidRunner"; remove.setAccessibilityLabel("Remove \(app.name) from LidRunner")
+            views.append(remove)
+        }
+        views += [keepLabel, toggle] // switches stay in one column, with or without a remove button
+        let row = hstack(views, spacing: 10)
         row.translatesAutoresizingMaskIntoConstraints = false; addSubview(row)
         NSLayoutConstraint.activate([row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
                                      row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor)])
@@ -145,14 +165,14 @@ final class AgentRow: NSView {
     /// `integration` is the cached badge text from `presentation.integration()`; the caller
     /// refreshes it every few seconds rather than re-reading config files on every tick.
     var integrationProbe: (() -> String?)? { presentation?.integration }
-    func update(running: Bool, launching: Bool, error: String?, enabled: Bool, integration: String?) {
+    func update(running: Bool, launching: Bool, error: String?, enabled: Bool, integration: String?, remote: String? = nil) {
         dot.contentTintColor = running ? .systemGreen : (launching ? .systemOrange : .tertiaryLabelColor)
         let status = error.map { "Couldn't open: \($0)" } ?? (running ? "Running" : (launching ? "Opening…" : "Not running"))
-        state.stringValue = [status, presentation?.remote].compactMap { $0 }.joined(separator: " · ")
+        state.stringValue = [status, remote ?? presentation?.remote ?? (custom ? "Added by you" : nil)].compactMap { $0 }.joined(separator: " · ")
         state.textColor = error == nil ? .secondaryLabelColor : .systemRed
         badge.stringValue = integration.map { "✓ " + $0 } ?? ""
         badge.isHidden = integration == nil
-        badge.toolTip = integration.map { "\($0) installed: the agent is told when the lid closes" }
+        badge.toolTip = integration.map { "\($0) \(presentation?.tip ?? "")" }
         toggle.state = enabled ? .on : .off
     }
 }
@@ -193,6 +213,37 @@ final class GuardRow: NSView {
     }
 }
 
+/// A switch with a title, a line of live state, and an optional button (Phone remote, Stay reachable).
+final class SettingRow: NSView {
+    let toggle = NSSwitch()
+    let button = NSButton(title: "", target: nil, action: nil)
+    private let detail = wrappingLabel("", size: 11)
+    init(symbolName: String, title: String, target: AnyObject, toggleAction: Selector, buttonTitle: String? = nil, buttonAction: Selector? = nil) {
+        super.init(frame: .zero)
+        let icon = symbol(symbolName, size: 19, weight: .regular, color: .secondaryLabelColor)
+        icon.widthAnchor.constraint(equalToConstant: 30).isActive = true; icon.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        detail.maximumNumberOfLines = 2
+        let text = vstack([label(title, size: 13, weight: .semibold), detail], spacing: 2)
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        toggle.controlSize = .small; toggle.target = target; toggle.action = toggleAction; toggle.setAccessibilityLabel(title)
+        button.bezelStyle = .rounded; button.controlSize = .small; button.target = target; button.action = buttonAction
+        button.title = buttonTitle ?? ""; button.isHidden = buttonTitle == nil
+        button.setContentHuggingPriority(.required, for: .horizontal); toggle.setContentHuggingPriority(.required, for: .horizontal)
+        let row = hstack([icon, text, spacer(), button, toggle], spacing: 10)
+        row.translatesAutoresizingMaskIntoConstraints = false; addSubview(row)
+        NSLayoutConstraint.activate([row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
+                                     row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor)])
+    }
+    required init?(coder: NSCoder) { nil }
+    func update(_ setting: SettingView, showButton: Bool = false) {
+        toggle.state = setting.on ? .on : .off
+        detail.stringValue = setting.detail
+        detail.textColor = setting.warn ? .systemOrange : .secondaryLabelColor
+        button.isHidden = !showButton || button.title.isEmpty
+    }
+}
+struct SettingView { var on = false; var detail = ""; var warn = false }
+
 /// Everything the window shows, computed once per tick (or faked for --demo snapshots).
 struct SessionView {
     enum Tone { case idle, active, busy, warning }
@@ -212,6 +263,10 @@ struct SessionView {
     var loginEnabled = true
     var captureGuard = GuardState.notInstalled
     var hours = 8
+    /// idle, starting, active, standby or stopping: the phone remote's view of the session.
+    var state = "idle"
+    var remote = SettingView(detail: "Start, stop and check sessions from your phone")
+    var reach = SettingView(detail: "Plugged in, the Mac stays awake with the lid closed")
     /// One line for the menu-bar menu.
     var menuTitle: String { tone == .idle ? "LidRunner · no session" : headline }
 }

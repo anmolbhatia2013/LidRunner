@@ -32,7 +32,7 @@ The installer runs local tests first, then updates user-level integrations for t
 - `plugin/skills/closed-lid-mode/scripts/status.py`: read-only lid/power/Capture Guard/agent-app status.
 - `plugin/skills/closed-lid-mode/scripts/hook.py`: lifecycle hook. `--host codex` (default), `--host claude`, or `--host antigravity --event PreInvocation`.
 - `.claude-plugin/marketplace.json`: local Claude Code marketplace `lidrunner-local`.
-- `tests/test_closed_lid_skill.py`: 66 tests across status, simulation, cache pruning, Codex, Claude, Antigravity and CLI paths. Set `LIDRUNNER_SKILL_SCRIPTS` to test an installed copy.
+- `tests/test_closed_lid_skill.py`: 69 tests across status, simulation, cache pruning, Codex, Claude, Antigravity and CLI paths. Set `LIDRUNNER_SKILL_SCRIPTS` to test an installed copy.
 - `install.sh [codex] [claude] [antigravity]`: run the tests, then install or refresh.
 - `plugin/assets/icon.png`: plugin icon for both Claude Code and Antigravity.
 

@@ -12,7 +12,7 @@ from pathlib import Path
 DATA_DIR = Path.home() / 'Library/Application Support/LidRunner'
 ROOT_STATUS = Path('/Library/Application Support/LidRunner/status.json')
 # Agent host apps LidRunner reports on. Only these keys and boolean values are copied.
-AGENT_APPS = ('chatgpt', 'claude', 'gemini', 'antigravity')
+AGENT_APPS = ('chatgpt', 'claude', 'gemini', 'antigravity', 'rustdesk')
 
 
 def read_json(path):
@@ -77,6 +77,9 @@ def evaluate(hw, diag, guard, root, now, supported=True):
     agent_apps = {k: apps[k] for k in AGENT_APPS if isinstance(apps, dict) and isinstance(apps.get(k), bool)}
     if 'chatgpt' not in agent_apps and diag_fresh and isinstance(diag.get('chatGPTRunning'), bool):
         agent_apps['chatgpt'] = diag['chatGPTRunning']  # LidRunner 1.1 diagnostics
+    # 'charger' = stay-reachable hold that ends two minutes after the charger is disconnected.
+    kind = diag.get('sessionKind') if diag_fresh and session_active else None
+    kind = kind if kind in ('timed', 'charger') else None
     mode = 'unsupported_host' if not supported else ('closed' if lid is True else 'open' if lid is False else 'unknown')
     alerts = []
     if mode == 'closed' and not (session_active and override is True):
@@ -85,6 +88,8 @@ def evaluate(hw, diag, guard, root, now, supported=True):
         alerts.append('automatic_capture_recovery_not_ready')
     if on_charger is False and battery is not None and battery <= 20:
         alerts.append('battery_near_15_percent_cutoff')
+    if kind == 'charger' and on_charger is False:
+        alerts.append('charger_hold_ends_two_minutes_after_unplugging')
     if session_active and deadline - now <= 300:
         alerts.append('session_expires_within_5_minutes')
     if mode == 'unknown':
@@ -95,6 +100,7 @@ def evaluate(hw, diag, guard, root, now, supported=True):
         'guard_permission': guard.get('accessibilityTrusted') if guard_fresh and isinstance(guard.get('accessibilityTrusted'), bool) else None,
         'battery_percent': battery, 'on_charger': on_charger,
         'session_remaining_seconds': max(0, int(deadline-now)) if session_active else None,
+        'session_kind': kind,
         'agent_apps_running': agent_apps or None,
         'diagnostics_fresh': bool(diag_fresh), 'guard_fresh': bool(guard_fresh),
         'alerts': alerts,

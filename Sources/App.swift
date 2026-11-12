@@ -71,6 +71,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     let footerLabel = wrappingLabel("", size: 11, color: .tertiaryLabelColor)
     var agentRows: [Int: AgentRow] = [:]
     var guardRow: GuardRow!
+    var agentsCard: Card!
+    // Phone remote and "stay reachable on charger" (methods in AppRemote.swift)
+    var remoteRow: SettingRow!, standbyRow: SettingRow!
+    let remoteServer = RemoteServer()
+    var remoteProblem: String?
+    var remoteListening = false
+    var remoteBlocked = false     // our own network probe got no answer: the firewall is in the way
+    var remoteProbedAt = 0.0
+    var remoteNonces = NonceCache(), remoteLockout = Lockout()
+    var remoteSecret: Data?
+    var remoteLastSeen: Double?
+    var remotePage: Data?, remoteIcon: Data?
+    var pairingWindow: NSWindow?
+    var pairingImage = NSImageView(), pairingLink = NSTextField(wrappingLabelWithString: ""), pairingPicker = NSSegmentedControl()
+    var lastStandbyStart: Double?
+    var pendingStart: Int?
+    var rustDeskID: String?
+    var helperVersion = 0
+    var remoteEnabled: Bool { UserDefaults.standard.bool(forKey: "remoteEnabled") }
+    var standbyEnabled: Bool { UserDefaults.standard.bool(forKey: "stayReachable") }
+    var sessionIsStandby: Bool { request?.acOnly == true }
     // Menu items refreshed each time the menu opens
     var menuStatus: NSMenuItem!, menuToggle: NSMenuItem!, menuStartFor: NSMenuItem!, menuLogin: NSMenuItem!
     var lastView = SessionView()
@@ -116,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     var quitAfterStop = false
     let networkMonitor = NWPathMonitor()
     var networkAvailable = false
-    let keepers = agentApps.map(AgentKeeper.init)
+    var keepers = (agentApps + customApps(from: UserDefaults.standard.array(forKey: "customApps"))).map(AgentKeeper.init)
     var chatGPT: AgentKeeper { keepers[0] }
     let heartbeatPath = userDir.appendingPathComponent("heartbeat.json").path
     lazy var heart = HeartbeatWriter(path: heartbeatPath)
@@ -125,7 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         try? FileManager.default.createDirectory(at: userDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var defaults: [String: Any] = Dictionary(uniqueKeysWithValues: agentApps.map { ($0.defaultsKey, true) })
+        var defaults: [String: Any] = Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.defaultsKey, true) })
         defaults["sessionHours"] = 8
         UserDefaults.standard.register(defaults: defaults)
         if snapshotMode { renderSnapshot(); return }
@@ -179,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             catch { lastError = "Open at Login could not be enabled. Use the menu to try again."; lastErrorAt = Date().timeIntervalSince1970; lastErrorIsStart = false }
         }
         makeWindow()
+        setupRemote()
         // Stay in the background when macOS opened us at login or a test flag is driving the app.
         let testing = CommandLine.arguments.contains("--start-verification")
         let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
@@ -219,7 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         NSLayoutConstraint.activate([tile.widthAnchor.constraint(equalToConstant: 44), tile.heightAnchor.constraint(equalToConstant: 44),
                                      tileIcon.centerXAnchor.constraint(equalTo: tile.centerXAnchor), tileIcon.centerYAnchor.constraint(equalTo: tile.centerYAnchor)])
         let header = hstack([tile, vstack([label("LidRunner", size: 22, weight: .bold),
-                                           label("Keep ChatGPT, Claude and Gemini working with the lid closed", size: 12, color: .secondaryLabelColor)], spacing: 1)], spacing: 12)
+                                           label("Keep your agents and remote tools working with the lid closed", size: 12, color: .secondaryLabelColor)], spacing: 1)], spacing: 12)
 
         // Session card
         progress.style = .bar; progress.isIndeterminate = false; progress.controlSize = .small; progress.minValue = 0
@@ -238,29 +260,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let session = Card([hstack([toneDot, headline], spacing: 8), detailLabel, progress, chips, errorLabel, controls], spacing: 10)
         [detailLabel, progress, controls, errorLabel].forEach(session.fill)
 
-        // Agents card
-        let agentsTitle = hstack([label("Agents", size: 13, weight: .semibold), spacer(),
-                                  label("The Mac stays awake for all of them", size: 11, color: .secondaryLabelColor)])
-        var agentViews: [NSView] = [agentsTitle]
-        for (index, keeper) in keepers.enumerated() where keeper.installedURL != nil {
-            let row = AgentRow(app: keeper.app, url: keeper.installedURL, index: index, target: self, action: #selector(toggleRemoteKeepAlive(_:)))
-            agentRows[index] = row; agentViews.append(row)
-        }
-        if agentRows.isEmpty { agentViews.append(wrappingLabel("No ChatGPT, Claude, Gemini or Antigravity app found. Sessions still keep the Mac awake for command-line agents.")) }
+        // Apps card (rebuilt when an app is added or removed)
         guardRow = GuardRow(target: self, action: #selector(guardAction))
-        let divider = NSBox(); divider.boxType = .separator
-        agentViews += [divider, guardRow]
-        let agents = Card(agentViews, spacing: 12)
-        agentViews.forEach(agents.fill)
+        let agents = Card([], spacing: 12); agentsCard = agents
+        populateApps()
 
-        let root = vstack([header, session, agents, footerLabel], spacing: 14)
+        // Phone card
+        remoteRow = SettingRow(symbolName: "iphone", title: "Phone remote", target: self, toggleAction: #selector(toggleRemote(_:)),
+                               buttonTitle: "Pair phone…", buttonAction: #selector(showPairing))
+        standbyRow = SettingRow(symbolName: "powerplug", title: "Stay reachable on charger", target: self, toggleAction: #selector(toggleStandby(_:)))
+        let phone = Card([remoteRow, standbyRow], spacing: 12)
+        [remoteRow, standbyRow].forEach(phone.fill)
+
+        let root = vstack([header, session, agents, phone, footerLabel], spacing: 14)
         root.edgeInsets = NSEdgeInsets(top: 34, left: 22, bottom: 18, right: 22)
         root.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(root)
         NSLayoutConstraint.activate([root.leadingAnchor.constraint(equalTo: content.leadingAnchor), root.trailingAnchor.constraint(equalTo: content.trailingAnchor),
                                      root.topAnchor.constraint(equalTo: content.topAnchor), root.bottomAnchor.constraint(equalTo: content.bottomAnchor),
                                      root.widthAnchor.constraint(equalToConstant: 580)])
-        [session, agents, footerLabel].forEach { $0.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -44).isActive = true }
+        [session, agents, phone, footerLabel].forEach { $0.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -44).isActive = true }
         fitWindow(); window.center()
+    }
+    func populateApps() {
+        let add = NSButton(title: "Add app…", target: self, action: #selector(addApp))
+        add.bezelStyle = .rounded; add.controlSize = .small
+        add.toolTip = "Keep any other app available during sessions, for example another remote-desktop or agent app"
+        var views: [NSView] = [hstack([label("Apps", size: 13, weight: .semibold),
+                                       label("The Mac stays awake for all of them", size: 11, color: .secondaryLabelColor), spacer(), add])]
+        agentRows = [:]; integrationCache = [:]; probedAt = 0
+        for (index, keeper) in keepers.enumerated() where keeper.installedURL != nil {
+            let row = AgentRow(app: keeper.app, url: keeper.installedURL, index: index, target: self,
+                               action: #selector(toggleRemoteKeepAlive(_:)), removeAction: #selector(removeApp(_:)))
+            agentRows[index] = row; views.append(row)
+        }
+        if agentRows.isEmpty { views.append(wrappingLabel("No supported agent or remote-desktop app found. Sessions still keep the Mac awake for command-line agents; use Add app… for anything else.")) }
+        let divider = NSBox(); divider.boxType = .separator
+        agentsCard.setViews(views + [divider, guardRow])
+    }
+    @objc func addApp() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.application]; panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications"); panel.prompt = "Add"
+        panel.message = "Choose an app to keep available during LidRunner sessions."
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url, let bundle = Bundle(url: url), let id = bundle.bundleIdentifier else { return }
+        let name = (bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle.object(forInfoDictionaryKey: "CFBundleName") as? String) ?? url.deletingPathExtension().lastPathComponent
+        var stored = UserDefaults.standard.array(forKey: "customApps") as? [[String: String]] ?? []
+        guard !keepers.contains(where: { $0.app.bundleID == id }), id != Bundle.main.bundleIdentifier, id != guardBundleID else { return }
+        stored.append(["name": String(name.prefix(60)), "bundleID": id])
+        guard let app = customApps(from: stored).last, app.bundleID == id else {
+            self.error("\(name) can't be added: its bundle identifier isn't supported.", start: false); return
+        }
+        UserDefaults.standard.set(stored, forKey: "customApps")
+        UserDefaults.standard.register(defaults: [app.defaultsKey: true])
+        keepers.append(AgentKeeper(app)); populateApps(); tick()
+    }
+    @objc func removeApp(_ sender: NSButton) {
+        guard keepers.indices.contains(sender.tag), keepers[sender.tag].app.custom else { return }
+        let id = keepers[sender.tag].app.bundleID
+        let stored = (UserDefaults.standard.array(forKey: "customApps") as? [[String: String]] ?? []).filter { $0["bundleID"] != id }
+        UserDefaults.standard.set(stored, forKey: "customApps")
+        UserDefaults.standard.removeObject(forKey: keepers[sender.tag].app.defaultsKey)
+        keepers.remove(at: sender.tag); populateApps(); tick()
     }
     func fitWindow() {
         window.contentView?.layoutSubtreeIfNeeded()
@@ -304,9 +366,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         shortcutLabel.textColor = v.shortcutRegistered ? .secondaryLabelColor : .systemOrange
         for (index, row) in agentRows {
             let k = keepers[index]
-            row.update(running: k.running, launching: k.launching, error: k.launchError, enabled: k.enabled, integration: integrationCache[index])
+            let remote = k.app.key == "rustdesk" ? rustDeskID.map { "Phone: RustDesk app · ID \($0)" } : nil
+            row.update(running: k.running, launching: k.launching, error: k.launchError, enabled: k.enabled, integration: integrationCache[index], remote: remote)
         }
         guardRow.update(v.captureGuard)
+        remoteRow.update(v.remote, showButton: v.remote.on)
+        standbyRow.update(v.reach)
         lastView = v
         footerLabel.stringValue = "Stops automatically at 15% battery, high thermal pressure, the time limit, or if LidRunner quits. Keep the Mac ventilated and stop the session before putting it in a bag." + (v.loginEnabled ? "" : "  Open at Login is off.")
         fitWindow()
@@ -320,7 +385,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             v.detail = "Safe to close the lid. Normal sleep returns at 21:30 or when you stop."
             v.canStart = false; v.canStop = true; v.lidClosed = demo == "closed"; v.power = Power(percent: demo == "closed" ? 22 : 64, ac: false)
             v.captureGuard = demo == "closed" ? .ready("Watching 1 shared window") : .ready("Active · no shared windows yet")
-        case "idle": v.captureGuard = .ready("Ready · works when the lid is closed in a session")
+        case "idle":
+            v.captureGuard = .ready("Ready · works when the lid is closed in a session")
+            v.remote = SettingView(on: true, detail: "On · Wi-Fi and Tailscale · phone last seen 2 minutes ago")
+        case "standby":
+            v.tone = .active; v.state = "standby"; v.headline = "Staying reachable on charger"; v.power = Power(percent: 100, ac: true); v.lidClosed = true
+            v.detail = "The Mac won't sleep while it's plugged in, even with the lid closed. Unplugging ends this after two minutes."
+            v.captureGuard = .ready("Active · no shared windows yet")
+            v.remote = SettingView(on: true, detail: "On · Wi-Fi and Tailscale · phone last seen just now")
+            v.reach = SettingView(on: true, detail: "Active: the Mac stays awake while plugged in")
         case "guard": v.captureGuard = .needsPermission
         case "error":
             v.tone = .warning; v.headline = "Session not started"; v.error = "Another sleep override is already active, or the setting could not be read. LidRunner has not changed it."
@@ -344,7 +417,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         }
     }
     @objc func durationChanged() { UserDefaults.standard.set(durationPopup.selectedTag(), forKey: "sessionHours") }
-    @objc func startSelected() { begin(seconds: sessionSeconds(storedHours: durationPopup.selectedTag())) }
+    @objc func startSelected() { startUserSession(seconds: sessionSeconds(storedHours: durationPopup.selectedTag())) }
     @objc func guardAction() {
         switch lastView.captureGuard {
         case .needsPermission:
@@ -359,7 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     // MARK: Menu
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard menu === item?.menu else { return }
-        let running = request != nil
+        let running = request != nil && !sessionIsStandby
         menuStatus.title = lastView.menuTitle
         menuToggle.title = running ? "Stop session and restore sleep" : "Start \(selectedHours)-hour session"
         menuStartFor.isHidden = running
@@ -368,7 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
         case #selector(toggleSession): return !busy && !stopping
-        case #selector(startMenu(_:)): return !busy && request == nil
+        case #selector(startMenu(_:)): return !busy && (request == nil || sessionIsStandby)
         default: return true
         }
     }
@@ -439,8 +512,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     // Shortcut and menu: stop the current session, or start one of the remembered length.
     @objc func toggleSession() {
-        if request != nil && !busy { stop() }
+        if sessionIsStandby { startUserSession(seconds: selectedHours * 3600) }
+        else if request != nil && !busy { stop() }
         else if request == nil && !busy { begin(seconds: selectedHours * 3600) }
+    }
+    /// Start a timed session. If "stay reachable" is holding the Mac awake, hand over to the timed
+    /// session: stop the hold, then start as soon as the helper has restored sleep. Only safe with
+    /// the lid open, because the Mac may sleep in the gap; callers check that for remote requests.
+    func startUserSession(seconds: Int) {
+        if sessionIsStandby, !busy { pendingStart = seconds; stop() }
+        else { begin(seconds: seconds) }
     }
     @objc func toggleLogin(_ sender: NSMenuItem) {
         do {
@@ -464,7 +545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         let result = RegisterEventHotKey(UInt32(kVK_ANSI_L), UInt32(cmdKey | optionKey | controlKey | shiftKey), id, GetApplicationEventTarget(), UInt32(kEventHotKeyExclusive), &hotKey)
         hotKeyRegistered = result == noErr
     }
-    @objc func startMenu(_ sender: NSMenuItem) { begin(seconds: sender.tag) }
+    @objc func startMenu(_ sender: NSMenuItem) { startUserSession(seconds: sender.tag) }
     @objc func diagnosticClick() {
         testClicks += 1
         if rootProperty("AppleClamshellState") == true { closedControlClicks += 1 }
@@ -488,24 +569,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated], reason: "LidRunner closed-lid session")
         } else if !wanted, let token = activity { ProcessInfo.processInfo.endActivity(token); activity = nil }
     }
-    func begin(seconds: Int) {
+    /// `standby` starts a charger-only "stay reachable" hold instead of a timed session. Its
+    /// failures stay quiet (no window, no "Session not started"): it simply tries again later.
+    func begin(seconds: Int, standby: Bool = false) {
         guard !busy, request == nil else { return }
+        let fail: (String) -> Void = { [self] message in self.error(message, start: !standby) }
         let battery = power()
-        guard battery.ac || (battery.percent ?? 0) > 15 else { error("Connect the charger or charge above 15% before starting."); return }
-        guard sleepDisabled() == 0 else { error("Another sleep override is already active, or the setting could not be read. LidRunner has not changed it."); return }
-        guard let helper = Bundle.main.path(forResource: "LidRunnerGuardian", ofType: nil) else { error("Missing helper executable."); return }
+        if standby { guard battery.ac else { return } }
+        guard battery.ac || (battery.percent ?? 0) > 15 else { fail("Connect the charger or charge above 15% before starting."); return }
+        guard sleepDisabled() == 0 else { fail("Another sleep override is already active, or the setting could not be read. LidRunner has not changed it."); return }
+        guard let helper = Bundle.main.path(forResource: "LidRunnerGuardian", ofType: nil) else { fail("Missing helper executable."); return }
         if let existing = readJSON(Status.self, systemDir + "/status.json"), ["active", "restoring"].contains(existing.phase) {
-            error("A previous session is still restoring sleep. Wait a few seconds and retry."); return
+            fail("A previous session is still restoring sleep. Wait a few seconds and retry."); return
         }
-        let r = Request(token: UUID().uuidString, uid: getuid(), pid: getpid(), boot: bootID(), created: Date().timeIntervalSince1970, seconds: seconds, heartbeat: heartbeatPath)
+        let r = Request(token: UUID().uuidString, uid: getuid(), pid: getpid(), boot: bootID(), created: Date().timeIntervalSince1970, seconds: seconds, heartbeat: heartbeatPath, acOnly: standby ? true : nil)
         request = r; busy = true; stopping = false; lastError = nil; lastErrorAt = nil; wasActive = false; heartbeat()
         // Ask once, in context: the only notification is "your session ended on its own".
         if Bundle.main.bundleIdentifier != nil { UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { _, _ in } }
         do {
             try writeJSON(r, userDir.appendingPathComponent("request.json").path)
-            let config = HelperConfig(version: 2, uid: getuid(), requestPath: userDir.appendingPathComponent("request.json").path, heartbeatPath: heartbeatPath)
+            // Protocol 3 adds charger-only sessions. A timed session still works with an installed
+            // protocol-2 helper, so upgrading LidRunner never forces an administrator prompt.
+            let config = HelperConfig(version: 3, uid: getuid(), requestPath: userDir.appendingPathComponent("request.json").path, heartbeatPath: heartbeatPath)
             let installed = readJSON(HelperConfig.self, systemDir + "/config.json")
-            if installed?.version == 2 && installed?.uid == getuid() && installed?.requestPath == config.requestPath && installed?.heartbeatPath == config.heartbeatPath && run("/bin/launchctl", ["print", "system/" + service]).1.contains("state = running") {
+            if (standby ? 3 : 2)...3 ~= (installed?.version ?? 0) && installed?.uid == getuid() && installed?.requestPath == config.requestPath && installed?.heartbeatPath == config.heartbeatPath && run("/bin/launchctl", ["print", "system/" + service]).1.contains("state = running") {
                 busy = false; tick(); return
             }
             authenticating = true
@@ -536,11 +623,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
                 let result = run("/usr/bin/osascript", ["-e", appleScript])
                 DispatchQueue.main.async {
                     self.busy = false; self.authenticating = false
-                    if result.0 != 0 { self.request = nil; self.error("Session was not enabled: \(result.1.trimmingCharacters(in: .whitespacesAndNewlines))") }
+                    if result.0 != 0 {
+                        self.request = nil
+                        if standby {
+                            // Never re-prompt in a loop: switch the option off and say why.
+                            UserDefaults.standard.set(false, forKey: "stayReachable")
+                            self.error("Stay reachable needs a one-time administrator approval to update LidRunner's helper. Turn it on again to retry.", start: false)
+                        } else { self.error("Session was not enabled: \(result.1.trimmingCharacters(in: .whitespacesAndNewlines))") }
+                    }
                     self.tick()
                 }
             }
-        } catch { busy = false; authenticating = false; request = nil; self.error(error.localizedDescription) }
+        } catch { busy = false; authenticating = false; request = nil; fail(error.localizedDescription) }
         tick()
     }
     func error(_ message: String, start: Bool = true) {
@@ -551,7 +645,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
     }
     func updateAssertions(active: Bool) {
         if active && assertions.isEmpty {
-            for kind in [kIOPMAssertionTypePreventUserIdleSystemSleep, kIOPMAssertionTypePreventUserIdleDisplaySleep] {
+            // A timed session also keeps the display from idling off. A charger hold must not:
+            // it can last for days with the lid open, and the screen should still sleep and lock.
+            let kinds = sessionIsStandby ? [kIOPMAssertionTypePreventUserIdleSystemSleep]
+                                         : [kIOPMAssertionTypePreventUserIdleSystemSleep, kIOPMAssertionTypePreventUserIdleDisplaySleep]
+            for kind in kinds {
                 var id: IOPMAssertionID = 0
                 if IOPMAssertionCreateWithName(kind as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "LidRunner active session" as CFString, &id) == kIOReturnSuccess { assertions.append(id) }
             }
@@ -567,7 +665,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if !snapshotMode {
             if active { wasActive = true }
             if mine && ["stopped", "failed"].contains(status?.phase ?? "") && !busy {
-                if let notice = sessionEndNotice(wasActive: wasActive, phase: status?.phase ?? "", reason: status?.reason ?? "", userStopping: stopping || quitAfterStop) {
+                // Charger holds come and go with the charger; only timed sessions are worth a notification.
+                if !sessionIsStandby, let notice = sessionEndNotice(wasActive: wasActive, phase: status?.phase ?? "", reason: status?.reason ?? "", userStopping: stopping || quitAfterStop) {
                     notifySessionEnded(notice)
                 }
                 request = nil; stopping = false; wasActive = false
@@ -584,9 +683,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         if closed { closedSamples += 1 }
         var displays = [CGDirectDisplayID](repeating: 0, count: 16); var count: UInt32 = 0
         CGGetActiveDisplayList(16, &displays, &count)
-        maintainAgentApps(active: active, now: now)
+        // During a charger hold with the lid open the user is at the Mac: don't reopen apps they quit.
+        maintainAgentApps(active: active && !(sessionIsStandby && !closed), now: now)
         let chatRunning = chatGPT.running
         let remaining = max(0, Int((status?.deadline ?? now) - now))
+        if !snapshotMode {
+            if request == nil, !busy, let seconds = pendingStart {
+                pendingStart = nil
+                DispatchQueue.main.async { self.begin(seconds: seconds) }
+            } else if pendingStart == nil {
+                switch standbyAction(enabled: standbyEnabled, onCharger: p.ac, sessionRequested: request != nil, sessionIsStandby: sessionIsStandby,
+                                     busy: busy || stopping || authenticating, thermal: ProcessInfo.processInfo.thermalState.rawValue,
+                                     lidClosed: closed, remaining: active ? remaining : nil, now: now, lastStart: lastStandbyStart) {
+                case .start:
+                    lastStandbyStart = now
+                    DispatchQueue.main.async { self.begin(seconds: maxSessionSeconds(acOnly: true), standby: true) }
+                case .stop: DispatchQueue.main.async { self.stop() }
+                case .none: break
+                }
+            }
+        }
         let login = SMAppService.mainApp.status == .enabled
 
         var v = SessionView()
@@ -594,15 +710,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         v.network = snapshotMode ? ((try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: diagnosticsPath)))) as? [String: Any])?["networkLinkAvailable"] as? Bool ?? false : networkAvailable
         v.shortcutRegistered = snapshotMode ? true : hotKeyRegistered
         v.loginEnabled = login
-        v.canStart = !busy && request == nil; v.canStop = request != nil && !stopping
+        // A charger hold is controlled by its own switch; the session buttons start a timed session over it.
+        v.canStart = !busy && !stopping && (request == nil || sessionIsStandby); v.canStop = request != nil && !stopping && !sessionIsStandby
         let anyAgent = keepers.contains(where: \.running)
         if authenticating {
-            v.tone = .busy; v.headline = "Waiting for administrator approval"; v.detail = "One-time setup installs the bounded sleep helper. LidRunner never sees your password."
+            v.tone = .busy; v.state = "starting"; v.headline = "Waiting for administrator approval"; v.detail = "One-time setup installs the bounded sleep helper. LidRunner never sees your password."
         } else if busy || (request != nil && !mine) {
-            v.tone = .busy; v.headline = "Starting session…"; v.detail = "Wait for “Session active” before closing the lid."
+            v.tone = .busy; v.state = "starting"; v.headline = sessionIsStandby ? "Starting to stay reachable…" : "Starting session…"; v.detail = "Wait for “Session active” before closing the lid."
         } else if stopping {
-            v.tone = .busy; v.headline = "Restoring normal sleep…"
+            v.tone = .busy; v.state = "stopping"; v.headline = pendingStart != nil ? "Switching to a timed session…" : "Restoring normal sleep…"
+        } else if active, sessionIsStandby {
+            v.tone = .active; v.state = "standby"; v.headline = "Staying reachable on charger"
+            v.detail = p.ac ? "The Mac won't sleep while it's plugged in, even with the lid closed. Unplugging ends this after two minutes."
+                            : "Charger disconnected. Normal sleep returns in two minutes unless you plug it back in or start a session."
         } else if active {
+            v.state = "active"
             let ends = DateFormatter.localizedString(from: Date(timeIntervalSince1970: status?.deadline ?? now), dateStyle: .none, timeStyle: .short)
             v.tone = .active; v.headline = "Session active · \(duration(remaining)) left"
             v.detail = "Safe to close the lid. Normal sleep returns at \(ends) or when you stop." + (anyAgent ? "" : " No agent app is running.")
@@ -620,6 +742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
             if lastErrorIsStart { v.headline = "Session not started" }
         }
         v.hours = selectedHours
+        describeRemote(&v, now: now, onCharger: p.ac)
         if now - probedAt >= 6 || now < probedAt {
             probedAt = now
             for (index, row) in agentRows { integrationCache[index] = row.integrationProbe?() }
@@ -632,9 +755,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSMenu
         render(v)
         if snapshotMode { return }
         menuStatus?.title = v.menuTitle // stays live while the menu is open
-        item?.button?.title = active ? " \(duration(remaining))" : ""
-        item?.button?.toolTip = active ? "LidRunner session active · \(duration(remaining)) left" : "LidRunner"
-        let diagnostic: [String: Any] = ["time": now, "started": began, "lidClosed": closed, "activeDisplays": count, "chatGPTRunning": chatRunning, "closedSamples": closedSamples, "largestSamplingGapSeconds": maximumGap, "controlTestClicks": testClicks, "closedControlTestClicks": closedControlClicks, "phase": status?.phase ?? "idle", "reason": status?.reason ?? "", "onCharger": p.ac, "batteryPercent": p.percent ?? -1, "sleepDisabled": rootProperty("SleepDisabled") ?? false, "thermalState": ProcessInfo.processInfo.thermalState.rawValue, "shortcutRegistered": hotKeyRegistered, "networkLinkAvailable": networkAvailable, "keepChatGPTAvailable": chatGPT.enabled, "chatGPTLaunchAttempts": chatGPT.attempts, "chatGPTLaunching": chatGPT.launching, "agentApps": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.running) }), "agentKeepAlive": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.enabled) }), "agentLaunchAttempts": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.attempts) }), "phoneConnectionVerifiedByMonitor": false, "loginEnabled": login, "shortcut": "Command-Option-Control-Shift-L"]
+        item?.button?.title = active && !sessionIsStandby ? " \(duration(remaining))" : ""
+        item?.button?.toolTip = active ? v.headline : "LidRunner"
+        let diagnostic: [String: Any] = ["time": now, "started": began, "lidClosed": closed, "activeDisplays": count, "chatGPTRunning": chatRunning, "closedSamples": closedSamples, "largestSamplingGapSeconds": maximumGap, "controlTestClicks": testClicks, "closedControlTestClicks": closedControlClicks, "phase": status?.phase ?? "idle", "reason": status?.reason ?? "", "onCharger": p.ac, "batteryPercent": p.percent ?? -1, "sleepDisabled": rootProperty("SleepDisabled") ?? false, "thermalState": ProcessInfo.processInfo.thermalState.rawValue, "shortcutRegistered": hotKeyRegistered, "networkLinkAvailable": networkAvailable, "keepChatGPTAvailable": chatGPT.enabled, "chatGPTLaunchAttempts": chatGPT.attempts, "chatGPTLaunching": chatGPT.launching, "agentApps": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.running) }), "agentKeepAlive": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.enabled) }), "agentLaunchAttempts": Dictionary(uniqueKeysWithValues: keepers.map { ($0.app.key, $0.attempts) }), "phoneConnectionVerifiedByMonitor": false, "sessionKind": sessionIsStandby ? "charger" : "timed", "stayReachable": standbyEnabled, "phoneRemote": remoteEnabled, "phoneRemoteListening": remoteListening, "phoneRemoteBlockedByFirewall": remoteBlocked, "loginEnabled": login, "shortcut": "Command-Option-Control-Shift-L"]
         if let data = try? JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys]) {
             try? data.write(to: URL(fileURLWithPath: diagnosticsPath), options: .atomic)
             // Session samples are evidence; idle samples are only state changes plus one a minute.

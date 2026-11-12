@@ -49,6 +49,16 @@ func power() -> Power {
 struct Request: Codable {
     var token: String; var uid: UInt32; var pid: Int32; var boot: String
     var created: Double; var seconds: Int; var heartbeat: String
+    // Helper protocol 3: a "stay reachable" session that only holds while on the charger.
+    var acOnly: Bool? = nil
+}
+/// Normal sessions stay bounded at eight hours. A charger-only session may run for a week,
+/// because the helper itself ends it two minutes after the charger is disconnected.
+let standbyUnplugGrace = 120.0
+func maxSessionSeconds(acOnly: Bool) -> Int { acOnly ? 7 * 86400 : 28800 }
+func standbyStopReason(acOnly: Bool, onCharger: Bool, unpluggedFor: Double?) -> String? {
+    guard acOnly, !onCharger, let unpluggedFor, unpluggedFor >= standbyUnplugGrace else { return nil }
+    return "Charger disconnected"
 }
 struct Heartbeat: Codable { var token: String; var time: Double; var stop: Bool }
 struct Status: Codable {
@@ -82,21 +92,37 @@ struct HelperConfig: Codable {
     var version: Int; var uid: UInt32; var requestPath: String; var heartbeatPath: String
 }
 
-// Agent host apps LidRunner can keep available during a session. Gemini on this Mac is
-// both the Gemini app and Google Antigravity; the IDE is excluded from capture moves only.
+// Apps LidRunner can keep available during a session: AI agents, remote-desktop tools, and any
+// app the user adds. Gemini is both the Gemini app and Google Antigravity; the IDE is excluded
+// from capture moves only.
 struct AgentApp {
     let key: String; let name: String; let bundleID: String
     let defaultsKey: String
     // ChatGPT keeps its 1.1 behaviour (opened even if closed at session start). The others are
     // only reopened if they were running earlier in this session, so unused apps never launch.
     let launchIfNeverSeen: Bool
+    var custom = false
 }
 let agentApps: [AgentApp] = [
     AgentApp(key: "chatgpt", name: "ChatGPT", bundleID: "com.openai.codex", defaultsKey: "keepChatGPTAvailable", launchIfNeverSeen: true),
     AgentApp(key: "claude", name: "Claude", bundleID: "com.anthropic.claudefordesktop", defaultsKey: "keepClaudeAvailable", launchIfNeverSeen: false),
     AgentApp(key: "gemini", name: "Gemini", bundleID: "com.google.GeminiMacOS", defaultsKey: "keepGeminiAvailable", launchIfNeverSeen: false),
     AgentApp(key: "antigravity", name: "Antigravity", bundleID: "com.google.antigravity", defaultsKey: "keepAntigravityAvailable", launchIfNeverSeen: false),
+    AgentApp(key: "rustdesk", name: "RustDesk", bundleID: "com.carriez.rustdesk", defaultsKey: "keepRustDeskAvailable", launchIfNeverSeen: false),
 ]
+/// Apps added with "Add app…", stored as [["name": ..., "bundleID": ...]]. They get the cautious
+/// keep-alive rule (reopened only if seen running this session) and are never launched otherwise.
+func customApps(from stored: Any?) -> [AgentApp] {
+    guard let rows = stored as? [[String: String]] else { return [] }
+    var seen = Set(agentApps.map(\.bundleID)), result: [AgentApp] = []
+    for row in rows.prefix(12) {
+        guard let name = row["name"], let id = row["bundleID"], !name.isEmpty, name.count <= 60,
+              id.count <= 200, id.contains("."), id.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" }),
+              seen.insert(id).inserted else { continue }
+        result.append(AgentApp(key: "custom:" + id, name: name, bundleID: id, defaultsKey: "keepCustom." + id, launchIfNeverSeen: false, custom: true))
+    }
+    return result
+}
 // Capture Guard never moves an agent's own windows.
 let agentBundleIDs: Set<String> = Set(agentApps.map(\.bundleID)).union(["com.google.antigravity-ide"])
 
@@ -179,9 +205,29 @@ func lastSessionSentence(_ reason: String) -> String {
     case "LidRunner closed": return "Last session stopped when LidRunner quit."
     case "LidRunner heartbeat lost": return "Last session stopped because LidRunner stopped responding."
     case "Power setting changed outside LidRunner": return "Last session stopped because something else changed the sleep setting."
+    case "Charger disconnected": return "Stay reachable ended because the charger was disconnected."
     case "Recovered interrupted session": return "Last session was interrupted by a restart or crash; normal sleep was restored."
     case let other:
         let text = other.hasSuffix(".") ? String(other.dropLast()) : other
         return text.isEmpty ? "Last session ended." : "Last session: \(text)."
     }
+}
+
+// MARK: - 1.5 stay reachable on charger
+
+enum StandbyAction: Equatable { case none, start, stop }
+/// "Stay reachable on charger": while plugged in, hold a charger-only session so the Mac stays
+/// awake with the lid closed and the phone can reach it. Only ever touches sessions it started.
+func standbyAction(enabled: Bool, onCharger: Bool, sessionRequested: Bool, sessionIsStandby: Bool, busy: Bool,
+                   thermal: Int, lidClosed: Bool, remaining: Int?, now: Double, lastStart: Double?) -> StandbyAction {
+    if sessionRequested {
+        guard sessionIsStandby, !busy else { return .none }
+        if !enabled { return .stop }
+        // Renew a long-running hold while the lid is open, when stopping cannot put the Mac to sleep.
+        if !lidClosed, onCharger, let remaining, remaining < 86400 { return .stop }
+        return .none
+    }
+    guard enabled, onCharger, !busy, thermal < 2 else { return .none }
+    if let lastStart, now - lastStart < 30, now >= lastStart { return .none }
+    return .start
 }

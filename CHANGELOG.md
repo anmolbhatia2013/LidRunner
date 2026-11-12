@@ -2,6 +2,25 @@
 
 Versions are the LidRunner app's. The agent plugin and Capture Guard carry their own version numbers, noted where they changed.
 
+## 1.5 — 12 November 2026
+
+### Added
+- **Phone remote.** A page on your phone, served by LidRunner over your Wi-Fi or Tailscale, that shows the Mac's state and starts or stops sessions. Off by default, paired by QR code, every command signed. See the README's [Phone remote](README.md#phone-remote) section for what it can do and its security model.
+- **Stay reachable on charger.** While plugged in, the Mac stays awake with the lid closed so the phone remote and remote tools can reach it. The privileged helper (protocol 3) ends the hold two minutes after the charger is disconnected. Needs a one-time administrator approval.
+- **RustDesk** as a built-in app, with a shortcut on the phone page to open it. Capture Guard (1.3) leaves its windows alone.
+- **Add app…** keeps any other installed app available during sessions.
+- LidRunner detects when the macOS firewall is blocking the phone remote and says so.
+- `status.py` reports `session_kind` (`timed` or `charger`) and RustDesk. Plugin 1.4.0.
+
+### Changed
+- `build.sh` signs with a stable identity when one is configured, so macOS keeps the firewall approval across upgrades.
+- The window's "Agents" card is now "Apps".
+- `uninstall.sh` removes the phone-remote pairing secret.
+
+### Not yet verified
+- Use from a physical phone, over Tailscale, and with the lid closed.
+- Stay reachable: the updated helper has not been installed or run.
+
 ## 1.4 — 11 November 2026
 
 ### Fixed

@@ -19,7 +19,7 @@ Run this short, read-only check when starting/resuming work on this Mac, before 
 
 A fresh lifecycle-hook notice ("LidRunner host observation: …") can satisfy the same check; avoid duplicate probes. `mode` is `closed`, `open`, `unknown`, or `unsupported_host`. Hardware state takes priority over fresh local diagnostics. Unknown is not open. On another host (a cloud sandbox, a remote agent, SSH), these local paths do not describe this Mac; use that host's available tools and do not assume access to this Mac.
 
-`power_session_active` verifies fresh app and privileged-helper status with an unexpired deadline. `capture_guard_ready` verifies fresh companion status and its permission. `agent_apps_running` lists which agent apps (ChatGPT, Claude, Gemini, Antigravity) LidRunner sees running. None of these prove a usable screenshot, successful input, or a phone connection. Verify the actual action in the actual app. Do not inspect account databases or assume phone transport from a network-link indicator.
+`power_session_active` verifies fresh app and privileged-helper status with an unexpired deadline. `capture_guard_ready` verifies fresh companion status and its permission. `agent_apps_running` lists which apps (ChatGPT, Claude, Gemini, Antigravity, RustDesk) LidRunner sees running. `session_kind` is `timed` for a normal bounded session or `charger` for a stay-reachable hold, which ends two minutes after the charger is disconnected. None of these prove a usable screenshot, successful input, or a phone connection. Verify the actual action in the actual app. Do not inspect account databases or assume phone transport from a network-link indicator.
 
 ## Choose the working path
 
@@ -36,12 +36,15 @@ Each agent's own pairing and permissions manage access; LidRunner only keeps the
 | ChatGPT / Codex | ChatGPT → Remote on iPhone | Desktop control after locking needs ChatGPT → Settings → Computer Use → Locked use. Verified on the development host on 24 Sep 2026; verify separately on this host. |
 | Claude | Claude Remote Control (Claude app on iPhone, or claude.ai/code) to a Claude Code session in the Claude desktop app or `claude` CLI | Requires that session to stay running; LidRunner can keep the Claude app open. Not yet physically verified with the lid closed. |
 | Gemini / Antigravity | `agy remote-control start` (background daemon), or `agy --remote-control` for one CLI session | The daemon runs independently of the Antigravity app. Not yet physically verified with the lid closed. |
+| RustDesk (remote desktop) | RustDesk app on the phone, connecting to this Mac's RustDesk ID | Needs RustDesk's own service installed for unattended access. It shows the whole screen, including the lock screen. Not yet physically verified with the lid closed. |
+
+The user may also have LidRunner's own **Phone remote** switched on: a page on their phone that can start or stop a session and switch **Stay reachable on charger** on or off. It cannot run commands or see the screen. Those controls belong to the user. Do not call LidRunner's local control port yourself, read its pairing secret (`remote-secret`), or change these settings unless the user explicitly asks.
 
 Prior results on this Mac do not prove another agent, app, or the current permission state works. Test the actual path.
 
 ## Partial, blank, stale, or displaced screenshots
 
-Capture Guard automatically centers standard app windows that expose macOS's English **Window sharing** control while a LidRunner session is active and the lid is closed. A new sharing session, changed display geometry, or window size/position change can trigger a move after about two seconds of stable geometry. It skips the agent apps' own windows (ChatGPT, Claude, Gemini, Antigravity).
+Capture Guard automatically centers standard app windows that expose macOS's English **Window sharing** control while a LidRunner session is active and the lid is closed. A new sharing session, changed display geometry, or window size/position change can trigger a move after about two seconds of stable geometry. It skips the agent and remote-desktop apps' own windows (ChatGPT, Claude, Gemini, Antigravity, RustDesk).
 
 1. Get fresh app accessibility state and a screenshot. If capture just started or moved, let the recovery settle and obtain a fresh observation. Discard earlier screen coordinates and stale element indexes.
 2. If the image remains partial, check status once. In the affected app, use its observed **Window → Center** command if available, then capture again. This recovery was verified in Calculator; inspect whether another app actually supports it.
@@ -53,7 +56,7 @@ The helper may re-center a window after moving or resizing it; avoid fighting it
 ## Preserve the working session
 
 - **⌘⌥⌃⇧L toggles LidRunner on/off.** Do not press it speculatively: it can stop all running closed-lid work, for every agent at once. Other global shortcuts depend on the host's configuration. Start a new power session only when needed and within the user's request; inspect current state first.
-- Keep the existing eight-hour bound, battery cutoff at 15%, thermal protection, and heartbeat recovery. Do not silently extend a session or remove cutoffs. If status reports battery near cutoff or session expiry, tell the user when that materially threatens ongoing work.
+- Keep the existing eight-hour bound, battery cutoff at 15%, thermal protection, and heartbeat recovery. Do not silently extend a session or remove cutoffs. A `charger` hold is different by design: it lasts while the Mac is plugged in and is not a reason to start a timed session. If status shows a charger hold with the charger disconnected, tell the user promptly: the Mac sleeps in two minutes unless it is plugged back in. If status reports battery near cutoff or session expiry, tell the user when that materially threatens ongoing work.
 - Keep LidRunner, Capture Guard and the agent app you are running in (and any other agent the user has working) running during active closed-lid work. Refreshing instructions, installing a skill, or updating a plugin does not require restarting them.
 - Once the lid opens, resume normal operation and refresh UI state because window geometry may change again. Do not end the power session merely because the lid opened.
 

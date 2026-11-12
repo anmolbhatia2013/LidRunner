@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="LidRunner">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f4f5f4" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111312" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="icon" href="/icon.png">
+<title>LidRunner</title>
+<style>
+:root {
+  --bg: #f4f5f4; --card: #ffffff; --line: #e2e5e3; --text: #141816; --muted: #5d6662; --faint: #8a938f;
+  --green: #17764f; --green-soft: #e3f3ec; --amber: #b25e09; --amber-soft: #fdf0dc; --red: #b3261e; --red-soft: #fbe9e7;
+  --press: #eef0ef; --on-green: #ffffff; --picked: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111312; --card: #1b1e1c; --line: #2b302d; --text: #f0f3f1; --muted: #a3ada8; --faint: #77817c;
+    --green: #3fbf87; --green-soft: #153327; --amber: #f0a13c; --amber-soft: #3a2a12; --red: #ff8a80; --red-soft: #3b1c1a;
+    --press: #252927; --on-green: #06140e; --picked: #454b47;
+  }
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+  padding: calc(env(safe-area-inset-top) + 20px) 16px calc(env(safe-area-inset-bottom) + 28px);
+  min-height: 100vh;
+}
+main { max-width: 460px; margin: 0 auto; display: grid; gap: 14px; }
+header { display: flex; align-items: center; gap: 12px; padding: 4px 2px 6px; }
+.tile { width: 44px; height: 44px; border-radius: 11px; background: #17764f; display: grid; place-items: center; flex: none; }
+.tile svg { width: 26px; height: 26px; }
+h1 { font-size: 22px; line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--muted); font-size: 13px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; }
+.state { display: flex; align-items: center; gap: 9px; }
+.dot { width: 11px; height: 11px; border-radius: 50%; background: var(--faint); flex: none; }
+.dot.active { background: var(--green); } .dot.busy { background: var(--amber); } .dot.warn { background: var(--red); }
+h2 { font-size: 20px; line-height: 1.2; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+.detail { color: var(--muted); font-size: 14px; margin: 8px 0 0; }
+.bar { height: 6px; border-radius: 3px; background: var(--line); margin-top: 14px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--green); border-radius: 3px; width: 0; transition: width .4s; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+.chip { font-size: 12px; font-weight: 600; color: var(--muted); background: var(--press); border-radius: 999px; padding: 4px 10px; }
+.chip.good { color: var(--green); background: var(--green-soft); } .chip.low { color: var(--amber); background: var(--amber-soft); }
+.problem { margin-top: 14px; color: var(--red); background: var(--red-soft); border-radius: 10px; padding: 10px 12px; font-size: 14px; }
+.actions { margin-top: 16px; display: grid; gap: 10px; }
+.segment { display: grid; grid-template-columns: repeat(4, 1fr); background: var(--press); border-radius: 12px; padding: 3px; gap: 3px; }
+.segment button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 15px; font-weight: 600; padding: 10px 0; border-radius: 9px; min-height: 44px; }
+.segment button[aria-pressed="true"] { background: var(--picked); color: var(--text); box-shadow: 0 1px 2px rgba(0,0,0,.12); }
+.primary, .plain {
+  border: 0; border-radius: 13px; font: inherit; font-size: 17px; font-weight: 650; min-height: 52px; width: 100%;
+  display: flex; align-items: center; justify-content: center; gap: 8px; text-decoration: none;
+}
+.primary { background: var(--green); color: var(--on-green); }
+.plain { background: var(--press); color: var(--text); }
+.plain.danger { color: var(--red); }
+button:disabled { opacity: .5; }
+button:active:not(:disabled), a.row:active { filter: brightness(.94); }
+.label { font-size: 12px; font-weight: 650; color: var(--faint); text-transform: uppercase; letter-spacing: .06em; margin: 0 0 4px 2px; }
+.row { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); color: inherit; text-decoration: none; min-height: 52px; }
+.row:first-of-type { border-top: 0; padding-top: 2px; } .row:last-child { padding-bottom: 2px; }
+.row .grow { flex: 1; min-width: 0; } .row b { font-weight: 600; display: block; } .row small { color: var(--muted); font-size: 13px; display: block; }
+.row .go { color: var(--green); font-weight: 650; font-size: 15px; flex: none; }
+.switch { position: relative; width: 51px; height: 31px; flex: none; }
+.switch input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; margin: 0; }
+.switch span { position: absolute; inset: 0; border-radius: 999px; background: var(--line); transition: background .2s; pointer-events: none; }
+.switch span::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .2s; }
+.switch input:checked + span { background: var(--green); } .switch input:checked + span::after { transform: translateX(20px); }
+.switch input:disabled + span { opacity: .5; }
+.foot { color: var(--faint); font-size: 12px; text-align: center; padding: 2px 12px; }
+ol { margin: 10px 0 0; padding-left: 20px; color: var(--muted); font-size: 14px; } ol li { margin: 5px 0; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="tile" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5.5" width="14" height="9.5" rx="1.6"/><path d="M2.8 18.5h18.4"/></svg></div>
+    <div><h1>LidRunner</h1><div class="sub" id="mac">Phone remote</div></div>
+  </header>
+
+  <section class="card" id="status" aria-live="polite">
+    <div class="state"><span class="dot" id="dot"></span><h2 id="headline">Connecting…</h2></div>
+    <p class="detail" id="detail"></p>
+    <div class="bar" id="bar" hidden><i id="fill"></i></div>
+    <div class="chips" id="chips" hidden></div>
+    <div class="problem" id="problem" hidden></div>
+    <div class="actions" id="actions" hidden>
+      <div class="segment" id="hours" role="group" aria-label="Session length"></div>
+      <button class="primary" id="start">Start session</button>
+      <button class="plain danger" id="stop" hidden>Stop session</button>
+    </div>
+    <ol id="steps" hidden></ol>
+  </section>
+
+  <section class="card" id="reach" hidden>
+    <label class="row" style="border-top:0;padding:0">
+      <span class="grow"><b>Stay reachable on charger</b><small id="reachDetail"></small></span>
+      <span class="switch"><input type="checkbox" id="standby" aria-label="Stay reachable on charger"><span></span></span>
+    </label>
+  </section>
+
+  <section id="appsSection" hidden>
+    <p class="label">Continue on this phone</p>
+    <div class="card" id="apps" style="padding:8px 18px"></div>
+  </section>
+
+  <p class="foot" id="foot"></p>
+</main>
+<script>
+"use strict";
+// --- SHA-256 and HMAC in plain JS: crypto.subtle is unavailable on http:// pages. ---
+const frac = x => ((x - Math.floor(x)) * 4294967296) >>> 0;
+const PRIMES = (() => { const p = []; for (let n = 2; p.length < 64; n++) if (p.every(q => n % q)) p.push(n); return p; })();
+const K = PRIMES.map(p => frac(Math.cbrt(p))), H0 = PRIMES.slice(0, 8).map(p => frac(Math.sqrt(p)));
+function sha256(msg) {
+  const len = msg.length, total = ((len + 9 + 63) >> 6) << 6, data = new Uint8Array(total), view = new DataView(data.buffer);
+  data.set(msg); data[len] = 0x80; view.setUint32(total - 8, Math.floor(len / 536870912)); view.setUint32(total - 4, (len * 8) >>> 0);
+  const h = H0.slice(), w = new Uint32Array(64), rotr = (x, n) => (x >>> n) | (x << (32 - n));
+  for (let off = 0; off < total; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3), s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+    }
+    let [a, b, c, d, e, f, g, hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) >>> 0;
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      hh = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    [a, b, c, d, e, f, g, hh].forEach((v, i) => { h[i] = (h[i] + v) >>> 0; });
+  }
+  const out = new Uint8Array(32), ov = new DataView(out.buffer); h.forEach((v, i) => ov.setUint32(i * 4, v)); return out;
+}
+function hmac(key, msg) {
+  if (key.length > 64) key = sha256(key);
+  const ipad = new Uint8Array(64 + msg.length), opad = new Uint8Array(96);
+  for (let i = 0; i < 64; i++) { const k = key[i] || 0; ipad[i] = k ^ 0x36; opad[i] = k ^ 0x5c; }
+  ipad.set(msg, 64); opad.set(sha256(ipad), 64); return sha256(opad);
+}
+const toHex = b => Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+const fromHex = s => new Uint8Array(s.match(/../g).map(x => parseInt(x, 16)));
+const utf8 = s => new TextEncoder().encode(s);
+
+// --- Pairing: the secret arrives in the link's #fragment (never sent to the server). It stays
+// in the address so "Add to Home Screen" carries it into the installed app's own storage. ---
+const STORE = "lidrunner-key";
+function pairingKey() {
+  const m = location.hash.match(/k=([0-9a-fA-F]{64})/);
+  try { if (m) localStorage.setItem(STORE, m[1].toLowerCase()); return localStorage.getItem(STORE); } catch (e) { return m ? m[1].toLowerCase() : null; }
+}
+let key = pairingKey(), clockOffset = 0, last = null, busy = false, chosenHours = null, failures = 0;
+
+async function call(method, path, body, retried) {
+  const text = body ? JSON.stringify(body) : "", time = String(Math.floor(Date.now() / 1000 + clockOffset));
+  const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
+  const head = utf8(method + "\n" + path + "\n" + time + "\n" + nonce + "\n"), tail = utf8(text), msg = new Uint8Array(head.length + tail.length);
+  msg.set(head); msg.set(tail, head.length);
+  const headers = { "X-LR-Time": time, "X-LR-Nonce": nonce, "X-LR-Sign": toHex(hmac(fromHex(key), msg)) };
+  if (text) headers["Content-Type"] = "application/json";
+  const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 7000);
+  try {
+    const res = await fetch(path, { method, headers, body: text || undefined, cache: "no-store", signal: abort.signal });
+    const json = await res.json().catch(() => ({}));
+    if (res.status === 401 && json.reason === "clock" && typeof json.time === "number" && !retried) {
+      clockOffset = json.time - Date.now() / 1000; return call(method, path, body, true);
+    }
+    return { status: res.status, json };
+  } finally { clearTimeout(timer); }
+}
+
+const $ = id => document.getElementById(id);
+const show = (id, on) => { $(id).hidden = !on; };
+function fmt(seconds) { const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60); return h > 0 ? h + "h " + m + "m" : m + "m"; }
+function steps(items) { const ol = $("steps"); ol.textContent = ""; items.forEach(t => { const li = document.createElement("li"); li.textContent = t; ol.appendChild(li); }); show("steps", items.length > 0); }
+
+function plain(headline, detail, tone, list) {
+  $("dot").className = "dot " + (tone || ""); $("headline").textContent = headline; $("detail").textContent = detail || "";
+  ["bar", "chips", "problem", "actions", "reach", "appsSection"].forEach(id => show(id, false)); steps(list || []);
+}
+function render(s) {
+  last = s; failures = 0; steps([]);
+  $("mac").textContent = s.name || "Your Mac";
+  const tone = s.state === "active" || s.state === "standby" ? "active" : (s.state === "starting" || s.state === "stopping" ? "busy" : (s.error ? "warn" : ""));
+  $("dot").className = "dot " + tone; $("headline").textContent = s.headline || "Ready"; $("detail").textContent = s.detail || "";
+  const timed = s.state === "active" && s.total > 0;
+  show("bar", timed); if (timed) $("fill").style.width = Math.max(0, Math.min(100, 100 * (s.total - s.remaining) / s.total)) + "%";
+  const chips = $("chips"); chips.textContent = "";
+  const chip = (text, cls) => { const c = document.createElement("span"); c.className = "chip " + (cls || ""); c.textContent = text; chips.appendChild(c); };
+  if (typeof s.battery === "number") chip((s.charging ? "Charger " : "Battery ") + s.battery + "%", s.charging ? "good" : (s.battery <= 25 ? "low" : ""));
+  chip(s.lidClosed ? "Lid closed" : "Lid open"); if (s.thermal >= 1) chip(s.thermal >= 2 ? "Hot" : "Warm", "low");
+  show("chips", true);
+  $("problem").textContent = s.error || ""; show("problem", !!s.error);
+  const running = s.state === "active" || s.state === "starting", idle = s.state === "idle" || s.state === "standby";
+  show("actions", true); show("hours", idle); show("start", idle); show("stop", running || s.state === "stopping");
+  $("stop").disabled = busy || s.state === "stopping"; $("start").disabled = busy;
+  if (chosenHours === null) chosenHours = s.hours || 8;
+  // Controls are created once and then only updated, so a refresh never swaps a button under a finger.
+  const seg = $("hours");
+  if (!seg.children.length) [1, 2, 4, 8].forEach(h => { const b = document.createElement("button"); b.textContent = h + "h"; b.dataset.hours = h; b.setAttribute("aria-label", h + (h === 1 ? " hour" : " hours")); b.onclick = () => { chosenHours = h; render(last); }; seg.appendChild(b); });
+  Array.from(seg.children).forEach(b => b.setAttribute("aria-pressed", String(Number(b.dataset.hours) === chosenHours)));
+  $("start").textContent = "Start " + chosenHours + "-hour session";
+  const sb = s.standby || {}; show("reach", true); $("standby").checked = !!sb.enabled; $("standby").disabled = busy || (!sb.enabled && !sb.available);
+  $("reachDetail").textContent = sb.enabled ? (s.state === "standby" ? "On. Your Mac stays awake while plugged in, so you can reach it with the lid closed." : (s.charging ? "On. Starts when no other session is running." : "On. Waiting for the charger."))
+    : (sb.available ? "Keeps your Mac awake while plugged in, so this page works with the lid closed." : "Turn this on at the Mac first; it needs a one-time approval there.");
+  const apps = (s.apps || []).filter(a => a.running && a.link), box = $("apps"), signature = JSON.stringify(apps);
+  if (box.dataset.signature !== signature) { box.dataset.signature = signature; box.textContent = ""; apps.forEach(a => { const r = document.createElement("a"); r.className = "row"; r.href = a.link; r.rel = "noopener";
+    const g = document.createElement("span"); g.className = "grow"; const b = document.createElement("b"); b.textContent = a.name; const sm = document.createElement("small"); sm.textContent = a.hint || "Running on your Mac";
+    g.appendChild(b); g.appendChild(sm); const go = document.createElement("span"); go.className = "go"; go.textContent = "Open"; r.appendChild(g); r.appendChild(go); box.appendChild(r); }); }
+  show("appsSection", apps.length > 0);
+  $("foot").textContent = running && !s.charging ? "Stops by itself at 15% battery, if the Mac gets hot, or when the time is up." : "";
+}
+
+async function refresh() {
+  if (!key) {
+    plain("Pair this phone", "This page controls LidRunner on your Mac. It needs a pairing code first.", "", ["On your Mac, open LidRunner.", "Turn on Phone remote and choose Pair phone.", "Scan the code with this phone's camera."]);
+    return;
+  }
+  try {
+    const r = await call("GET", "/api/status");
+    if (r.status === 200) render(r.json);
+    else if (r.status === 401) plain("This phone isn't paired", "The pairing code changed, or this phone was never paired with this Mac.", "warn", ["On your Mac, open LidRunner and choose Pair phone.", "Scan the new code with this phone's camera."]);
+    else if (r.status === 429) plain("Too many attempts", "The Mac is refusing requests for a few minutes. Try again shortly.", "warn");
+    else plain("Something went wrong", "The Mac answered with an error (" + r.status + ").", "warn");
+  } catch (e) {
+    if (++failures < 2 && last) return;
+    plain("Can't reach your Mac", "It is asleep, switched off, or on a different network.", "warn",
+      ["With the lid closed, a Mac sleeps unless a LidRunner session or Stay reachable was already on.", "Check this phone is on the same Wi-Fi as the Mac, or that Tailscale is on for both.", "This page keeps trying and updates by itself."]);
+  }
+}
+async function act(path, body, confirmText) {
+  if (busy || (confirmText && !confirm(confirmText))) { if (last) render(last); return; }
+  busy = true; if (last) render(last);
+  try {
+    const r = await call("POST", path, body);
+    if (r.status !== 200 && last) { last.error = r.json.error || "The Mac refused that request."; }
+  } catch (e) { if (last) last.error = "Couldn't reach the Mac. It may be asleep."; }
+  busy = false; if (last) render(last); setTimeout(refresh, 600); setTimeout(refresh, 3000);
+}
+$("start").onclick = () => act("/api/session", { action: "start", hours: chosenHours || 8 });
+$("stop").onclick = () => act("/api/session", { action: "stop" }, last && last.lidClosed ? "Stop the session? With the lid closed your Mac will go to sleep, and you won't be able to reach it until someone opens it." : null);
+$("standby").onchange = e => act("/api/standby", { enabled: e.target.checked }, !e.target.checked && last && last.lidClosed ? "Turn off Stay reachable? With the lid closed your Mac will go to sleep, and you won't be able to reach it until someone opens it." : null);
+refresh(); setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+window.addEventListener("hashchange", () => { key = pairingKey(); refresh(); });
+</script>
+</body>
+</html>

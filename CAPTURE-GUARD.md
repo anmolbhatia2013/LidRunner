@@ -15,7 +15,7 @@ The helper starts at login through `~/Library/LaunchAgents/com.anmolbhatia.lidru
 
 ## Scope
 
-The helper uses Apple's Accessibility window-position API. It reads window geometry and sharing controls in window chrome, not document contents. It does not request screen-recording permission, take or save screenshots, send data, type into apps, click document buttons, activate other apps, resize documents, or change authentication. ChatGPT's own windows, hidden apps, minimized windows, full-screen windows and non-standard windows are excluded.
+The helper uses Apple's Accessibility window-position API. It reads window geometry and sharing controls in window chrome, not document contents. It does not request screen-recording permission, take or save screenshots, send data, type into apps, click document buttons, activate other apps, resize documents, or change authentication. The agent and remote-desktop apps' own windows (ChatGPT, Claude, Gemini, Antigravity, RustDesk), hidden apps, minimized windows, full-screen windows and non-standard windows are excluded.
 
 Currently the sharing detector recognizes the English macOS **Window sharing** menu button, which was observed in the actual failing app. Apps or language settings that expose different accessibility chrome may not be recognized. A shared window being moved or resized is re-centered after it settles. Larger-than-display windows are not resized, so their entire contents may still not fit. Repeated failures are rate limited.
 
